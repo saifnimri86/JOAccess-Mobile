@@ -1,0 +1,218 @@
+import React, { useState } from 'react';
+import {
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../utils/theme';
+
+export default function LoginScreen({ navigation }) {
+  const { login, error, clearError } = useAuth();
+  const { t, isRTL } = useLanguage();
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleLogin() {
+    clearError();
+
+    if (!email.trim()) {
+      Alert.alert(t('error'), t('emailRequired'));
+      return;
+    }
+    if (!password) {
+      Alert.alert(t('error'), t('passwordRequired'));
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await login(email.trim().toLowerCase(), password);
+      // Navigation happens automatically via the auth state change
+    } catch (msg) {
+      Alert.alert(t('error'), typeof msg === 'string' ? msg : t('invalidCredentials'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  const textAlign = isRTL ? 'right' : 'left';
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Header icon */}
+        <View style={styles.iconCircle}>
+          <Ionicons name="lock-closed" size={36} color={colors.white} />
+        </View>
+
+        <Text style={[styles.title, { textAlign }]}>{t('login')}</Text>
+        <Text style={[styles.subtitle, { textAlign }]}>{t('loginSubtitle')}</Text>
+
+        {/* Email */}
+        <View style={styles.inputContainer}>
+          <Ionicons name="mail-outline" size={20} color={colors.darkGrey} style={styles.inputIcon} />
+          <TextInput
+            style={[styles.input, isRTL && styles.inputRTL]}
+            placeholder={t('email')}
+            placeholderTextColor={colors.mediumGrey}
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoComplete="email"
+            textAlign={textAlign}
+          />
+        </View>
+
+        {/* Password */}
+        <View style={styles.inputContainer}>
+          <Ionicons name="lock-closed-outline" size={20} color={colors.darkGrey} style={styles.inputIcon} />
+          <TextInput
+            style={[styles.input, isRTL && styles.inputRTL, { flex: 1 }]}
+            placeholder={t('password')}
+            placeholderTextColor={colors.mediumGrey}
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            textAlign={textAlign}
+          />
+          <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
+            <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={colors.darkGrey} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Login Button */}
+        <TouchableOpacity
+          style={[styles.button, isSubmitting && styles.buttonDisabled]}
+          onPress={handleLogin}
+          disabled={isSubmitting}
+          activeOpacity={0.8}
+        >
+          {isSubmitting ? (
+            <ActivityIndicator color={colors.white} />
+          ) : (
+            <Text style={styles.buttonText}>{t('login')}</Text>
+          )}
+        </TouchableOpacity>
+
+        {/* Sign Up Link */}
+        <View style={styles.linkRow}>
+          <Text style={styles.linkText}>{t('noAccount')} </Text>
+          <TouchableOpacity onPress={() => navigation.navigate('Signup')}>
+            <Text style={styles.linkAction}>{t('signup')}</Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.grey,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    padding: spacing.xxl,
+  },
+  iconCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: colors.primary,
+    alignSelf: 'center',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.xl,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  title: {
+    fontSize: fontSizes.xxl,
+    fontWeight: fontWeights.bold,
+    color: colors.primary,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  subtitle: {
+    fontSize: fontSizes.md,
+    color: colors.darkGrey,
+    textAlign: 'center',
+    marginBottom: spacing.xxxl,
+  },
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    borderRadius: borderRadius.md,
+    borderWidth: 2,
+    borderColor: colors.lightGrey,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.md,
+  },
+  inputIcon: {
+    marginRight: spacing.sm,
+  },
+  input: {
+    flex: 1,
+    paddingVertical: spacing.lg,
+    fontSize: fontSizes.md,
+    color: colors.black,
+  },
+  inputRTL: {
+    textAlign: 'right',
+  },
+  eyeBtn: {
+    padding: spacing.sm,
+  },
+  button: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.lg,
+    alignItems: 'center',
+    marginTop: spacing.md,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  buttonDisabled: {
+    opacity: 0.7,
+  },
+  buttonText: {
+    color: colors.white,
+    fontSize: fontSizes.lg,
+    fontWeight: fontWeights.bold,
+  },
+  linkRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginTop: spacing.xl,
+  },
+  linkText: {
+    fontSize: fontSizes.md,
+    color: colors.darkGrey,
+  },
+  linkAction: {
+    fontSize: fontSizes.md,
+    color: colors.primary,
+    fontWeight: fontWeights.bold,
+  },
+});

@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "JOAccess",
+    "slug": "joaccess-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#800000",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.joaccess.mobile",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "JOAccess uses your location to show nearby accessible locations on the map.",
+        "NSCameraUsageDescription": "JOAccess uses the camera to let you take photos of accessible locations.",
+        "NSPhotoLibraryUsageDescription": "JOAccess accesses your photo library to let you upload photos of accessible locations."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#800000"
+      },
+      "package": "com.joaccess.mobile",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [
+      "expo-location",
+      "expo-image-picker",
+      "expo-secure-store",
+      "expo-asset",
+      "expo-font"
+    ]
+  }
+}
