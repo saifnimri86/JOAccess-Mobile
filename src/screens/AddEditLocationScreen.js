@@ -1,16 +1,48 @@
-import React, { useState, useEffect, useRef } from 'react';
+/**
+ * AddEditLocationScreen (Phase 1.5)
+ * =================================
+ * Redesigned with the full design system. Preserves all original logic:
+ *   - Bilingual name/description/address fields (EN + AR)
+ *   - Category picker (bottom sheet)
+ *   - Map tap to set coordinates
+ *   - Accessibility feature chips
+ *   - Photo picker (gallery + camera)
+ *   - Create / Update via api.js
+ *
+ * Structural changes:
+ *   - Uses FormField + PrimaryButton components
+ *   - Category picker is a BottomSheet instead of a full-screen modal
+ *   - Features are Chip-based (tap-to-toggle) instead of a checklist
+ *   - Photos are a horizontal scroll with delete affordance
+ *   - Map picker retains its WebView but with polished tile style
+ *     matching high-contrast if that's on
+ *   - Proper SafeAreaView with stack-screen back button
+ */
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity,
-  Alert, ActivityIndicator, Image, Platform,
+  View, Text, StyleSheet, ScrollView, Image, Platform,
+  KeyboardAvoidingView, ActivityIndicator, PermissionsAndroid, FlatList,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
-import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
-import { Ionicons } from '@expo/vector-icons';
+import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
+import Geolocation from 'react-native-geolocation-service';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+
 import { useLanguage } from '../context/LanguageContext';
+import { useAccessibility } from '../context/AccessibilityContext';
+import { useDialog } from '../context/DialogContext';
 import * as api from '../services/api';
-import { JORDAN_CENTER, MAP_TILE_URL, UPLOADS_BASE } from '../config';
-import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../utils/theme';
+import { JORDAN_CENTER, JORDAN_BOUNDS, UPLOADS_BASE, GOOGLE_PLACES_API_KEY } from '../config';
+
+import FormField from '../components/FormField';
+import PrimaryButton from '../components/PrimaryButton';
+import AnimatedPressable from '../components/AnimatedPressable';
+import Chip from '../components/Chip';
+import BottomSheet from '../components/BottomSheet';
+import SectionHeader from '../components/SectionHeader';
+import StaggeredReveal from '../components/StaggeredReveal';
 
 const CATEGORIES = [
   'Restaurants & Cafes', 'Shopping Malls', 'Supermarkets', 'Healthcare',
@@ -25,13 +57,51 @@ const FEATURES = [
   'wide_doorways', 'automatic_doors',
 ];
 
+// Accurate Jordan Border Polygon for strict validation (from web version)
+const JORDAN_POLYGON = [
+  [32.393992, 35.545665],
+  [32.709192, 35.719918],
+  [32.312938, 36.834062],
+  [33.378686, 38.792341],
+  [32.161009, 39.195468],
+  [32.010217, 39.004886],
+  [31.508413, 37.002166],
+  [30.5085, 37.998849],
+  [30.338665, 37.66812],
+  [30.003776, 37.503582],
+  [29.865283, 36.740528],
+  [29.505254, 36.501214],
+  [29.197495, 36.068941],
+  [29.356555, 34.956037],
+  [29.501326, 34.922603],
+  [31.100066, 35.420918],
+  [31.489086, 35.397561],
+  [31.782505, 35.545252],
+  [32.393992, 35.545665],
+];
+
+// Point-in-polygon ray-casting check
+function isPointInJordan(lat, lng) {
+  let inside = false;
+  for (let i = 0, j = JORDAN_POLYGON.length - 1; i < JORDAN_POLYGON.length; j = i++) {
+    const xi = JORDAN_POLYGON[i][0], yi = JORDAN_POLYGON[i][1];
+    const xj = JORDAN_POLYGON[j][0], yj = JORDAN_POLYGON[j][1];
+    const intersect = ((yi > lng) !== (yj > lng)) && (lat < (xj - xi) * (lng - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 export default function AddEditLocationScreen({ route, navigation }) {
-  const { t, isRTL } = useLanguage();
+  const { t, lang, isRTL } = useLanguage();
+  const { theme, scale, announce, colorBlindMode, highContrast } = useAccessibility();
+  const { showDialog } = useDialog();
   const webViewRef = useRef(null);
+  const searchTimerRef = useRef(null);
   const isEdit = route?.params?.locationId != null;
   const locationId = route?.params?.locationId;
 
-  // ── Form state ──
+  // Form state
   const [name, setName] = useState('');
   const [nameAr, setNameAr] = useState('');
   const [description, setDescription] = useState('');
@@ -42,131 +112,306 @@ export default function AddEditLocationScreen({ route, navigation }) {
   const [latitude, setLatitude] = useState(null);
   const [longitude, setLongitude] = useState(null);
   const [selectedFeatures, setSelectedFeatures] = useState(new Set());
-  const [photos, setPhotos] = useState([]); // Array of { uri, filename, base64 }
-  const [existingPhotos, setExistingPhotos] = useState([]); // filenames from server
+  const [photos, setPhotos] = useState([]);
+  const [existingPhotos, setExistingPhotos] = useState([]);
   const [saving, setSaving] = useState(false);
   const [loadingData, setLoadingData] = useState(isEdit);
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
 
-  // ── Load existing data for edit mode ──
+  // Search Map state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [mapScrollLock, setMapScrollLock] = useState(false);
+
+  // Load existing data if editing
   useEffect(() => {
-    if (isEdit) loadLocation();
+    if (!isEdit) return;
+    (async () => {
+      try {
+        const loc = await api.getLocation(locationId);
+        setName(loc.name || '');
+        setNameAr(loc.name_ar || '');
+        setDescription(loc.description || '');
+        setDescriptionAr(loc.description_ar || '');
+        setCategory(loc.category || '');
+        setAddress(loc.address || '');
+        setAddressAr(loc.address_ar || '');
+        setLatitude(loc.latitude);
+        setLongitude(loc.longitude);
+        setExistingPhotos(loc.photos || []);
+        setSelectedFeatures(new Set(loc.accessibility_features?.map((f) => f.type) || []));
+
+        // Center map on existing location once the WebView loads
+        setTimeout(() => {
+          webViewRef.current?.injectJavaScript(`
+            if (typeof map !== 'undefined') {
+              map.setView([${loc.latitude}, ${loc.longitude}], 15);
+              placeMarker(${loc.latitude}, ${loc.longitude});
+            }
+          `);
+        }, 1000);
+      } catch (err) {
+        showDialog(t('error'), err.message || 'Failed to load location');
+        navigation.goBack();
+      } finally {
+        setLoadingData(false);
+      }
+    })();
   }, [isEdit, locationId]);
 
-  async function loadLocation() {
-    try {
-      const loc = await api.getLocation(locationId);
-      setName(loc.name || '');
-      setNameAr(loc.name_ar || '');
-      setDescription(loc.description || '');
-      setDescriptionAr(loc.description_ar || '');
-      setCategory(loc.category || '');
-      setAddress(loc.address || '');
-      setAddressAr(loc.address_ar || '');
-      setLatitude(loc.latitude);
-      setLongitude(loc.longitude);
-      setExistingPhotos(loc.photos || []);
-      const feats = new Set(loc.accessibility_features?.map((f) => f.type) || []);
-      setSelectedFeatures(feats);
+  // Default map to user's current location (add mode only)
+  useEffect(() => {
+    if (isEdit) return;
+    (async () => {
+      try {
+        if (Platform.OS === 'android') {
+          const granted = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          );
+          if (granted !== PermissionsAndroid.RESULTS.GRANTED) return;
+        }
+        Geolocation.getCurrentPosition(
+          (position) => {
+            const { latitude: lat, longitude: lng } = position.coords;
+            setLatitude(lat);
+            setLongitude(lng);
+            setTimeout(() => {
+              webViewRef.current?.injectJavaScript(`
+                if (typeof map !== 'undefined') {
+                  map.setView([${lat}, ${lng}], 15);
+                  placeMarker(${lat}, ${lng});
+                }
+              `);
+            }, 1000);
+          },
+          () => { /* silently fall back to Jordan center */ },
+          { enableHighAccuracy: false, timeout: 10000, maximumAge: 10000 },
+        );
+      } catch { /* ignore */ }
+    })();
+  }, [isEdit]);
 
-      // Center map on location
-      setTimeout(() => {
-        webViewRef.current?.injectJavaScript(`
-          if (typeof map !== 'undefined') {
-            map.setView([${loc.latitude}, ${loc.longitude}], 15);
-            placeMarker(${loc.latitude}, ${loc.longitude});
-          }
-        `);
-      }, 1000);
-    } catch (err) {
-      Alert.alert(t('error'), err.message || 'Failed to load location');
-      navigation.goBack();
-    } finally {
-      setLoadingData(false);
-    }
-  }
+  // Check if coordinates fall within Jordan's actual borders (polygon)
+  const isInJordan = (lat, lng) => isPointInJordan(lat, lng);
 
-  // ── Handle map tap from WebView ──
-  function onWebViewMessage(event) {
+  const onWebViewMessage = (event) => {
     try {
       const msg = JSON.parse(event.nativeEvent.data);
       if (msg.type === 'mapClick') {
+        if (!isInJordan(msg.lat, msg.lng)) {
+          showDialog(
+            lang === 'ar' ? 'خارج الأردن' : 'Outside Jordan',
+            lang === 'ar'
+              ? 'لا يمكنك إضافة مواقع خارج حدود الأردن. الرجاء اختيار موقع داخل الأردن.'
+              : 'You can only add locations within Jordan. Please pick a location inside Jordan.',
+          );
+          return;
+        }
         setLatitude(msg.lat);
         setLongitude(msg.lng);
+        announce(lang === 'ar'
+          ? 'تم تحديد الموقع على الخريطة'
+          : 'Location pinned on map');
       }
     } catch {}
-  }
+  };
 
-  // ── Toggle feature ──
-  function toggleFeature(feat) {
-    const next = new Set(selectedFeatures);
-    if (next.has(feat)) next.delete(feat);
-    else next.add(feat);
-    setSelectedFeatures(next);
-  }
+  const toggleFeature = (feat) => {
+    setSelectedFeatures((prev) => {
+      const next = new Set(prev);
+      if (next.has(feat)) next.delete(feat);
+      else next.add(feat);
+      return next;
+    });
+  };
 
-  // ── Pick photos from gallery ──
-  async function pickPhotos() {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert(t('error'), 'Photo library permission required');
+  const onSearchTextChange = (text) => {
+    setSearchQuery(text);
+    // Clear previous timer
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+
+    if (!text.trim() || text.trim().length < 2) {
+      setSuggestions([]);
+      setSearchLoading(false);
       return;
     }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true,
-      quality: 0.7,
-      base64: true,
+    setSearchLoading(true);
+    // Debounce: wait 300ms after user stops typing before firing
+    searchTimerRef.current = setTimeout(() => {
+      fetchPlacesSuggestions(text.trim());
+    }, 300);
+  };
+
+  const fetchPlacesSuggestions = async (text) => {
+    try {
+      const response = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY,
+        },
+        body: JSON.stringify({
+          input: text,
+          includedRegionCodes: ['JO'],
+          languageCode: lang === 'ar' ? 'ar' : 'en',
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        // Show the actual API error so we can debug
+        showDialog(
+          'Places API Error',
+          `Status: ${response.status}\n${data?.error?.message || JSON.stringify(data)}`,
+        );
+        setSuggestions([]);
+        setSearchLoading(false);
+        return;
+      }
+
+      if (data.suggestions) {
+        setSuggestions(data.suggestions.map(s => s.placePrediction).filter(Boolean));
+      } else {
+        setSuggestions([]);
+      }
+    } catch (err) {
+      showDialog('Network Error', err.message);
+      setSuggestions([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  // Fetch place details in a specific language
+  const fetchPlaceDetails = async (placeId, languageCode) => {
+    const response = await fetch(`https://places.googleapis.com/v1/places/${placeId}?languageCode=${languageCode}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY,
+        'X-Goog-FieldMask': 'location,displayName,formattedAddress',
+      },
     });
+    return response.json();
+  };
 
-    if (!result.canceled) {
-      const newPhotos = result.assets.map((asset) => ({
-        uri: asset.uri,
-        filename: asset.fileName || `photo_${Date.now()}.jpg`,
-        base64: asset.base64,
-      }));
-      setPhotos([...photos, ...newPhotos]);
+  const handleSuggestionPress = async (placeId, placeText) => {
+    setSearchQuery(placeText);
+    setSuggestions([]);
+    
+    try {
+      // Fetch both English and Arabic details in parallel
+      const [enData, arData] = await Promise.all([
+        fetchPlaceDetails(placeId, 'en'),
+        fetchPlaceDetails(placeId, 'ar'),
+      ]);
+
+      // Extract names
+      const enName = enData?.displayName?.text || '';
+      const arName = arData?.displayName?.text || '';
+      const enAddr = enData?.formattedAddress || '';
+      const arAddr = arData?.formattedAddress || '';
+
+      // Fill English fields
+      setName(enName || arName);
+      setAddress(enAddr || arAddr);
+
+      // Fill Arabic fields — use Arabic if available, otherwise fall back to English
+      setNameAr(arName || enName);
+      setAddressAr(arAddr || enAddr);
+
+      // Set coordinates and pan map
+      const loc = enData?.location || arData?.location;
+      if (loc) {
+        const { latitude: lat, longitude: lng } = loc;
+        if (!isInJordan(lat, lng)) {
+          showDialog(
+            lang === 'ar' ? 'خارج الأردن' : 'Outside Jordan',
+            lang === 'ar'
+              ? 'هذا المكان خارج حدود الأردن. يمكنك فقط إضافة مواقع داخل الأردن.'
+              : 'This place is outside Jordan. You can only add locations within Jordan.',
+          );
+          // Clear the coordinates so user can't save
+          setLatitude(null);
+          setLongitude(null);
+          return;
+        }
+        setLatitude(lat);
+        setLongitude(lng);
+        webViewRef.current?.injectJavaScript(`
+          if (typeof map !== 'undefined') {
+            map.setView([${lat}, ${lng}], 15);
+            placeMarker(${lat}, ${lng});
+          }
+        `);
+      }
+
+      announce(lang === 'ar' ? 'تم تعبئة بيانات المكان' : 'Place details filled');
+    } catch (err) {
+      console.error(err);
     }
-  }
+  };
 
-  // ── Take photo with camera ──
-  async function takePhoto() {
-    const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert(t('error'), 'Camera permission required');
-      return;
-    }
+  const pickFromGallery = () => {
+    launchImageLibrary(
+      { mediaType: 'photo', selectionLimit: 10, quality: 0.7, includeBase64: true },
+      (response) => {
+        if (response.didCancel || response.errorCode) return;
+        if (response.assets) {
+          const newPhotos = response.assets.map((asset) => ({
+            uri: asset.uri,
+            filename: asset.fileName || `photo_${Date.now()}.jpg`,
+            base64: asset.base64,
+          }));
+          setPhotos((prev) => [...prev, ...newPhotos]);
+        }
+      }
+    );
+  };
 
-    const result = await ImagePicker.launchCameraAsync({
-      quality: 0.7,
-      base64: true,
+  const takePhoto = () => {
+    launchCamera(
+      { mediaType: 'photo', quality: 0.7, includeBase64: true },
+      (response) => {
+        if (response.didCancel || response.errorCode) return;
+        if (response.assets?.[0]) {
+          const asset = response.assets[0];
+          setPhotos((prev) => [...prev, {
+            uri: asset.uri,
+            filename: asset.fileName || `camera_${Date.now()}.jpg`,
+            base64: asset.base64,
+          }]);
+        }
+      }
+    );
+  };
+
+  const removePhoto = (index) => {
+    setPhotos((prev) => {
+      const next = [...prev];
+      next.splice(index, 1);
+      return next;
     });
+  };
 
-    if (!result.canceled) {
-      const asset = result.assets[0];
-      setPhotos([...photos, {
-        uri: asset.uri,
-        filename: asset.fileName || `camera_${Date.now()}.jpg`,
-        base64: asset.base64,
-      }]);
-    }
-  }
-
-  // ── Remove a new photo ──
-  function removePhoto(index) {
-    const next = [...photos];
-    next.splice(index, 1);
-    setPhotos(next);
-  }
-
-  // ── Save ──
   async function handleSave() {
-    if (!name.trim()) { Alert.alert(t('error'), t('locationNameEn') + ' required'); return; }
-    if (!nameAr.trim()) { Alert.alert(t('error'), t('locationNameAr') + ' required'); return; }
-    if (!category) { Alert.alert(t('error'), t('category') + ' required'); return; }
+    if (!name.trim())     { showDialog(t('error'), lang === 'ar' ? 'الاسم بالإنجليزية مطلوب' : 'English name required'); return; }
+    if (!nameAr.trim())   { showDialog(t('error'), lang === 'ar' ? 'الاسم بالعربية مطلوب' : 'Arabic name required'); return; }
+    if (!category)        { showDialog(t('error'), t('category') + ' required'); return; }
     if (latitude === null || longitude === null) {
-      Alert.alert(t('error'), t('tapMapToSelect'));
+      showDialog(t('error'), t('tapMapToSelect'));
+      return;
+    }
+    if (!isInJordan(latitude, longitude)) {
+      showDialog(
+        t('error'),
+        lang === 'ar'
+          ? 'الموقع المحدد خارج حدود الأردن. الرجاء اختيار موقع داخل الأردن.'
+          : 'The selected location is outside Jordan. Please choose a location within Jordan.',
+      );
       return;
     }
 
@@ -183,31 +428,458 @@ export default function AddEditLocationScreen({ route, navigation }) {
         address: address.trim(),
         address_ar: addressAr.trim(),
         accessibility_features: Array.from(selectedFeatures),
-        photos_base64: photos.map((p) => ({
-          filename: p.filename,
-          data: p.base64,
-        })),
+        photos_base64: photos.map((p) => ({ filename: p.filename, data: p.base64 })),
       };
 
       if (isEdit) {
         await api.updateLocation(locationId, payload);
-        Alert.alert(t('success'), t('locationUpdated'));
+        showDialog(t('success'), t('locationUpdated'));
       } else {
         await api.createLocation(payload);
-        Alert.alert(t('success'), t('locationAdded'));
+        showDialog(t('success'), t('locationAdded'));
       }
       navigation.goBack();
     } catch (err) {
-      Alert.alert(t('error'), err.message || 'Save failed');
+      showDialog(t('error'), err.message || 'Save failed');
     } finally {
       setSaving(false);
     }
   }
 
+  // Memoize the HTML so it only regenerates when theme.mode changes (not on every keystroke)
+  const pickerHtml = useMemo(
+    () => generatePickerHtml(theme.mode, colorBlindMode, highContrast),
+    [theme.mode, colorBlindMode, highContrast]
+  );
+
   const textAlign = isRTL ? 'right' : 'left';
 
-  // ── Map picker HTML ──
-  const pickerHtml = `
+  return (
+    <View style={[styles.root, { backgroundColor: theme.color.bg }]}>
+      <SafeAreaView
+        style={styles.root}
+        edges={['top', 'left', 'right']}
+      >
+      {/* Custom header with back button */}
+      <View style={styles.topBar}>
+        <AnimatedPressable
+          onPress={() => navigation.goBack()}
+          accessibilityLabel={lang === 'ar' ? 'رجوع' : 'Back'}
+          hitSlop={12}
+          style={[styles.backBtn, { backgroundColor: theme.color.surface, borderColor: theme.color.border }]}
+        >
+          <Ionicons name={isRTL ? 'arrow-forward' : 'arrow-back'} size={22} color={theme.color.text} />
+        </AnimatedPressable>
+        <Text style={{
+          flex: 1, marginHorizontal: 12,
+          fontSize: scale(theme.fontSizes.lg),
+          fontWeight: theme.fontWeights.bold,
+          color: theme.color.text,
+          fontFamily: theme.fontFamily,
+          textAlign: 'center',
+        }} accessibilityRole="header" numberOfLines={1}>
+          {isEdit
+            ? (lang === 'ar' ? 'تعديل المكان' : 'Edit location')
+            : (lang === 'ar' ? 'إضافة مكان' : 'Add location')}
+        </Text>
+        <View style={{ width: 40 }} />{/* spacer to center the title */}
+      </View>
+
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingBottom: 40 }]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          scrollEnabled={!mapScrollLock}
+        >
+          {/* ─── Search & Map picker ─── */}
+          <StaggeredReveal index={0}>
+            <SectionHeader
+              title={lang === 'ar' ? 'البحث وموقع الخريطة' : 'Search & Map Location'}
+              icon="map"
+              subtitle={latitude !== null
+                ? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`
+                : (lang === 'ar' ? 'ابحث عن مكان أو اضغط على الخريطة' : 'Search for a place or tap the map')}
+              align={textAlign}
+            />
+            
+            <View>
+              <FormField
+                icon="search"
+                placeholder={lang === 'ar' ? 'ابحث عن مكان للتحديد...' : 'Search place to pin...'}
+                value={searchQuery}
+                onChangeText={onSearchTextChange}
+              />
+              
+              {searchLoading && suggestions.length === 0 && (
+                <View style={{ alignItems: 'center', paddingVertical: 8 }}>
+                  <ActivityIndicator size="small" color={theme.color.brand} />
+                </View>
+              )}
+
+              {suggestions.length > 0 && (
+                <View style={[styles.suggestionsContainer, {
+                  backgroundColor: theme.color.surface,
+                  borderColor: theme.color.border,
+                }]}>
+                  <FlatList
+                    data={suggestions}
+                    keyExtractor={(item) => item.placeId}
+                    keyboardShouldPersistTaps="handled"
+                    nestedScrollEnabled={true}
+                    scrollEnabled={true}
+                    showsVerticalScrollIndicator={true}
+                    style={{ maxHeight: 220 }}
+                    renderItem={({ item: pred }) => (
+                      <AnimatedPressable
+                        style={[styles.suggestionItem, { borderBottomColor: theme.color.border }]}
+                        onPress={() => handleSuggestionPress(pred.placeId, pred.text.text)}
+                      >
+                        <Ionicons name="location-outline" size={18} color={theme.color.textMuted} />
+                        <View style={{ marginLeft: 8, flex: 1 }}>
+                          <Text style={{ color: theme.color.text, fontFamily: theme.fontFamily, fontSize: scale(theme.fontSizes.md) }}>
+                            {pred.structuredFormat?.mainText?.text || pred.text.text}
+                          </Text>
+                          {pred.structuredFormat?.secondaryText?.text ? (
+                            <Text style={{ color: theme.color.textMuted, fontFamily: theme.fontFamily, fontSize: scale(theme.fontSizes.sm), marginTop: 2 }}>
+                              {pred.structuredFormat.secondaryText.text}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </AnimatedPressable>
+                    )}
+                  />
+                </View>
+              )}
+            </View>
+
+            <View
+              style={[
+                styles.mapContainer,
+                {
+                  borderColor: theme.color.border,
+                  borderRadius: theme.radii.lg,
+                  backgroundColor: theme.color.bgSunken,
+                },
+              ]}
+              onTouchStart={() => setMapScrollLock(true)}
+              onTouchEnd={() => setMapScrollLock(false)}
+              onTouchCancel={() => setMapScrollLock(false)}
+            >
+              <WebView
+                key={theme.mode}
+                ref={webViewRef}
+                source={{ html: pickerHtml }}
+                style={styles.map}
+                onMessage={onWebViewMessage}
+                javaScriptEnabled
+                domStorageEnabled
+                originWhitelist={['*']}
+              />
+            </View>
+          </StaggeredReveal>
+
+          {/* ─── Basic info ─── */}
+          <StaggeredReveal index={1}>
+            <SectionHeader
+              title={lang === 'ar' ? 'المعلومات الأساسية' : 'Basic info'}
+              icon="information-circle"
+              align={textAlign}
+            />
+            <FormField
+              icon="text"
+              placeholder={lang === 'ar' ? 'الاسم (إنجليزي)' : 'Name (English)'}
+              value={name}
+              onChangeText={setName}
+            />
+            <FormField
+              icon="text"
+              placeholder={lang === 'ar' ? 'الاسم (عربي)' : 'Name (Arabic)'}
+              value={nameAr}
+              onChangeText={setNameAr}
+            />
+            <FormField
+              icon="document-text-outline"
+              placeholder={lang === 'ar' ? 'الوصف (إنجليزي)' : 'Description (English)'}
+              value={description}
+              onChangeText={setDescription}
+              multiline
+              numberOfLines={3}
+            />
+            <FormField
+              icon="document-text-outline"
+              placeholder={lang === 'ar' ? 'الوصف (عربي)' : 'Description (Arabic)'}
+              value={descriptionAr}
+              onChangeText={setDescriptionAr}
+              multiline
+              numberOfLines={3}
+            />
+          </StaggeredReveal>
+
+          {/* ─── Category picker ─── */}
+          <StaggeredReveal index={2}>
+            <SectionHeader title={t('category')} icon="grid" align={textAlign} />
+            <AnimatedPressable
+              onPress={() => setShowCategoryPicker(true)}
+              accessibilityLabel={t('category')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: !!category }}
+              style={[
+                styles.pickerBtn,
+                {
+                  backgroundColor: theme.color.surface,
+                  borderColor: category ? theme.color.brand : theme.color.border,
+                  borderRadius: theme.radii.md,
+                },
+              ]}
+            >
+              <Ionicons
+                name={category ? (theme.categoryIcon[category] || 'grid') : 'grid-outline'}
+                size={20}
+                color={category ? theme.color.brand : theme.color.textMuted}
+              />
+              <Text style={{
+                flex: 1, marginLeft: 10,
+                color: category ? theme.color.text : theme.color.textMuted,
+                fontSize: scale(theme.fontSizes.md),
+                fontWeight: category ? theme.fontWeights.semibold : theme.fontWeights.regular,
+                fontFamily: theme.fontFamily,
+                textAlign,
+              }}>
+                {category ? t(category) : (lang === 'ar' ? 'اختر فئة' : 'Pick a category')}
+              </Text>
+              <Ionicons name="chevron-forward" size={18} color={theme.color.textMuted} />
+            </AnimatedPressable>
+          </StaggeredReveal>
+
+          {/* ─── Address ─── */}
+          <StaggeredReveal index={3}>
+            <SectionHeader title={t('address')} icon="location" align={textAlign} />
+            <FormField
+              icon="location-outline"
+              placeholder={lang === 'ar' ? 'العنوان (إنجليزي)' : 'Address (English)'}
+              value={address}
+              onChangeText={setAddress}
+            />
+            <FormField
+              icon="location-outline"
+              placeholder={lang === 'ar' ? 'العنوان (عربي)' : 'Address (Arabic)'}
+              value={addressAr}
+              onChangeText={setAddressAr}
+            />
+          </StaggeredReveal>
+
+          {/* Map moved to the top */}
+
+          {/* ─── Features ─── */}
+          <StaggeredReveal index={4}>
+            <SectionHeader
+              title={t('accessibilityFeatures')}
+              icon="accessibility"
+              subtitle={selectedFeatures.size === 0
+                ? (lang === 'ar' ? 'اختر الميزات المتاحة' : 'Select available features')
+                : (lang === 'ar' ? `${selectedFeatures.size} محدد` : `${selectedFeatures.size} selected`)}
+              align={textAlign}
+            />
+            <View style={styles.chipFlow}>
+              {FEATURES.map((feat) => (
+                <Chip
+                  key={feat}
+                  label={t(feat)}
+                  icon={theme.featureIcon[feat] || 'checkmark'}
+                  selected={selectedFeatures.has(feat)}
+                  onPress={() => toggleFeature(feat)}
+                  tone="success"
+                  size="sm"
+                />
+              ))}
+            </View>
+          </StaggeredReveal>
+
+          {/* ─── Photos ─── */}
+          <StaggeredReveal index={5}>
+            <SectionHeader
+              title={lang === 'ar' ? 'الصور' : 'Photos'}
+              icon="camera"
+              align={textAlign}
+            />
+            <View style={styles.photoActions}>
+              <AnimatedPressable
+                onPress={pickFromGallery}
+                accessibilityLabel={lang === 'ar' ? 'اختر من المعرض' : 'Pick from gallery'}
+                style={[styles.photoBtn, {
+                  backgroundColor: theme.color.brandMuted,
+                  borderRadius: theme.radii.md,
+                }]}
+              >
+                <Ionicons name="images" size={18} color={theme.color.textBrand} />
+                <Text style={{
+                  marginLeft: 8, color: theme.color.textBrand,
+                  fontSize: scale(theme.fontSizes.sm),
+                  fontWeight: theme.fontWeights.semibold,
+                  fontFamily: theme.fontFamily,
+                }}>
+                  {lang === 'ar' ? 'من المعرض' : 'Gallery'}
+                </Text>
+              </AnimatedPressable>
+
+              <AnimatedPressable
+                onPress={takePhoto}
+                accessibilityLabel={lang === 'ar' ? 'التقط صورة' : 'Take photo'}
+                style={[styles.photoBtn, {
+                  backgroundColor: theme.color.brandMuted,
+                  borderRadius: theme.radii.md,
+                }]}
+              >
+                <Ionicons name="camera" size={18} color={theme.color.textBrand} />
+                <Text style={{
+                  marginLeft: 8, color: theme.color.textBrand,
+                  fontSize: scale(theme.fontSizes.sm),
+                  fontWeight: theme.fontWeights.semibold,
+                  fontFamily: theme.fontFamily,
+                }}>
+                  {lang === 'ar' ? 'الكاميرا' : 'Camera'}
+                </Text>
+              </AnimatedPressable>
+            </View>
+
+            {(photos.length > 0 || existingPhotos.length > 0) ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 10, paddingVertical: 4 }}
+              >
+                {existingPhotos.map((filename, i) => (
+                  <View key={`existing-${i}`} style={styles.photoWrap}>
+                    <Image
+                      source={{ uri: `${UPLOADS_BASE}/${filename}` }}
+                      style={[styles.photo, { borderRadius: theme.radii.md }]}
+                    />
+                  </View>
+                ))}
+                {photos.map((p, i) => (
+                  <View key={`new-${i}`} style={styles.photoWrap}>
+                    <Image source={{ uri: p.uri }} style={[styles.photo, { borderRadius: theme.radii.md }]} />
+                    <AnimatedPressable
+                      onPress={() => removePhoto(i)}
+                      accessibilityLabel={lang === 'ar' ? 'حذف الصورة' : 'Remove photo'}
+                      hitSlop={6}
+                      style={[styles.photoRemove, { backgroundColor: theme.color.danger }]}
+                    >
+                      <Ionicons name="close" size={14} color="#FFFFFF" />
+                    </AnimatedPressable>
+                  </View>
+                ))}
+              </ScrollView>
+            ) : null}
+          </StaggeredReveal>
+
+          {/* ─── Submit ─── */}
+          <StaggeredReveal index={6}>
+            <View style={{ marginTop: 24 }}>
+              <PrimaryButton
+                label={isEdit
+                  ? (lang === 'ar' ? 'حفظ التغييرات' : 'Save changes')
+                  : (lang === 'ar' ? 'إضافة المكان' : 'Add location')}
+                icon="checkmark-circle-outline"
+                loading={saving}
+                onPress={handleSave}
+              />
+            </View>
+          </StaggeredReveal>
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {/* ═══ Category picker bottom sheet ═══ */}
+      <BottomSheet
+        visible={showCategoryPicker}
+        onClose={() => setShowCategoryPicker(false)}
+        title={t('category')}
+        scrollable
+      >
+        {CATEGORIES.map((cat) => {
+          const selected = cat === category;
+          return (
+            <AnimatedPressable
+              key={cat}
+              onPress={() => {
+                setCategory(cat);
+                setShowCategoryPicker(false);
+                announce(t(cat));
+              }}
+              accessibilityLabel={t(cat)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected }}
+              style={[
+                styles.catRow,
+                {
+                  backgroundColor: selected ? theme.color.brandMuted : 'transparent',
+                  borderRadius: theme.radii.md,
+                },
+              ]}
+            >
+              <View style={[
+                styles.catIconBox,
+                { backgroundColor: theme.categoryColor[cat] || theme.color.brand },
+              ]}>
+                <Ionicons name={theme.categoryIcon[cat] || 'pin'} size={16} color="#FFFFFF" />
+              </View>
+              <Text style={{
+                flex: 1, marginLeft: 12,
+                color: selected ? theme.color.textBrand : theme.color.text,
+                fontSize: scale(theme.fontSizes.md),
+                fontWeight: selected ? theme.fontWeights.bold : theme.fontWeights.regular,
+                fontFamily: theme.fontFamily,
+              }}>
+                {t(cat)}
+              </Text>
+              {selected ? (
+                <Ionicons name="checkmark-circle" size={20} color={theme.color.brand} />
+              ) : null}
+            </AnimatedPressable>
+          );
+        })}
+      </BottomSheet>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Leaflet HTML for the map picker
+// ═══════════════════════════════════════════════════════════
+function buildMapFilter(colorBlindMode, highContrast) {
+  const parts = [];
+  if (highContrast) parts.push('contrast(1.2) brightness(1.05)');
+  if (colorBlindMode === 'achromatopsia') parts.push('grayscale(100%)');
+  else if (['protanopia', 'deuteranopia', 'tritanopia'].includes(colorBlindMode)) parts.push('url(#cb-filter)');
+  return parts.join(' ');
+}
+
+function buildColorBlindSVG(colorBlindMode) {
+  const matrices = {
+    protanopia:   '0.567 0.433 0     0 0  0.558 0.442 0     0 0  0     0.242 0.758 0 0  0 0 0 1 0',
+    deuteranopia: '0.625 0.375 0     0 0  0.7   0.3   0     0 0  0     0.3   0.7   0 0  0 0 0 1 0',
+    tritanopia:   '0.95  0.05  0     0 0  0     0.433 0.567 0 0  0     0.475 0.525 0 0  0 0 0 1 0',
+  };
+  const m = matrices[colorBlindMode];
+  if (!m) return '';
+  return `<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden"><defs><filter id="cb-filter" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="${m}"/></filter></defs></svg>`;
+}
+
+function generatePickerHtml(themeMode, colorBlindMode = 'none', highContrast = false) {
+  const isDark = themeMode === 'dark';
+  const tileUrl = isDark
+    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+  const maroon = isDark ? '#B33838' : '#800000';
+  const mapFilter = buildMapFilter(colorBlindMode, highContrast);
+
+  return `
 <!DOCTYPE html>
 <html>
 <head>
@@ -215,275 +887,191 @@ export default function AddEditLocationScreen({ route, navigation }) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
-    * { margin: 0; padding: 0; }
-    html, body, #map { width: 100%; height: 100%; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { ${mapFilter ? `filter: ${mapFilter};` : ''} }
+    html, body, #map {
+      width: 100%; height: 100%;
+      background: ${isDark ? '#0A0707' : '#FAF7F5'};
+    }
+    .picker-marker {
+      width: 28px; height: 28px;
+      background-color: ${maroon};
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      border: 2px solid ${isDark ? '#0A0707' : '#FFFFFF'};
+      box-shadow: 0 4px 12px rgba(128,0,0,0.4);
+    }
+    .picker-marker::after {
+      content: '';
+      width: 10px; height: 10px;
+      background: ${isDark ? '#0A0707' : '#FFFFFF'};
+      position: absolute;
+      border-radius: 50%;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+    }
   </style>
 </head>
 <body>
+  ${buildColorBlindSVG(colorBlindMode)}
   <div id="map"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    var map = L.map('map', { zoomControl: true, minZoom: 7, maxZoom: 18 })
+    var map = L.map('map', { zoomControl: true, minZoom: 7, maxZoom: 18,
+      maxBounds: [[28.5, 34.0], [34.0, 40.0]], maxBoundsViscosity: 1.0 })
       .setView([${JORDAN_CENTER.lat}, ${JORDAN_CENTER.lng}], 8);
-    L.tileLayer('${MAP_TILE_URL}', { maxZoom: 19 }).addTo(map);
+    L.tileLayer('${tileUrl}', { maxZoom: 19, subdomains: 'abcd' }).addTo(map);
 
     var marker = null;
-    function placeMarker(lat, lng) {
-      if (marker) map.removeLayer(marker);
-      marker = L.marker([lat, lng]).addTo(map);
+
+    // Accurate Jordan Border Polygon
+    var JORDAN_POLY = [
+      [32.393992, 35.545665],[32.709192, 35.719918],[32.312938, 36.834062],
+      [33.378686, 38.792341],[32.161009, 39.195468],[32.010217, 39.004886],
+      [31.508413, 37.002166],[30.5085, 37.998849],[30.338665, 37.66812],
+      [30.003776, 37.503582],[29.865283, 36.740528],[29.505254, 36.501214],
+      [29.197495, 36.068941],[29.356555, 34.956037],[29.501326, 34.922603],
+      [31.100066, 35.420918],[31.489086, 35.397561],[31.782505, 35.545252],
+      [32.393992, 35.545665]
+    ];
+
+    function isPointInJordan(lat, lng) {
+      var inside = false;
+      for (var i = 0, j = JORDAN_POLY.length - 1; i < JORDAN_POLY.length; j = i++) {
+        var xi = JORDAN_POLY[i][0], yi = JORDAN_POLY[i][1];
+        var xj = JORDAN_POLY[j][0], yj = JORDAN_POLY[j][1];
+        var intersect = ((yi > lng) !== (yj > lng)) && (lat < (xj - xi) * (lng - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
     }
+
+    function placeMarker(lat, lng) {
+      if (!isPointInJordan(lat, lng)) {
+        showToast('Location must be within Jordan / \u0627\u0644\u0645\u0648\u0642\u0639 \u064A\u062C\u0628 \u0623\u0646 \u064A\u0643\u0648\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u0623\u0631\u062F\u0646');
+        return false;
+      }
+      if (marker) map.removeLayer(marker);
+      var icon = L.divIcon({
+        html: '<div class="picker-marker"></div>',
+        className: 'picker-icon',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+      });
+      marker = L.marker([lat, lng], { icon: icon }).addTo(map);
+      return true;
+    }
+
+    // Toast for out-of-bounds feedback
+    var toastEl = document.createElement('div');
+    toastEl.id = 'bounds-toast';
+    toastEl.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:8px;font-size:13px;font-family:sans-serif;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none;text-align:center;max-width:90%;';
+    toastEl.style.background = '${isDark ? "rgba(179,56,56,0.9)" : "rgba(128,0,0,0.9)"}';
+    toastEl.style.color = '#fff';
+    document.body.appendChild(toastEl);
+    var toastTimer = null;
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.style.opacity = '1';
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(function() { toastEl.style.opacity = '0'; }, 3000);
+    }
+
     map.on('click', function(e) {
+      if (!isPointInJordan(e.latlng.lat, e.latlng.lng)) {
+        showToast('Location must be within Jordan / \u0627\u0644\u0645\u0648\u0642\u0639 \u064A\u062C\u0628 \u0623\u0646 \u064A\u0643\u0648\u0646 \u062F\u0627\u062E\u0644 \u0627\u0644\u0623\u0631\u062F\u0646');
+        return;
+      }
       placeMarker(e.latlng.lat, e.latlng.lng);
       window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'mapClick', lat: e.latlng.lat, lng: e.latlng.lng
+        type: 'mapClick',
+        lat: e.latlng.lat,
+        lng: e.latlng.lng
       }));
     });
   </script>
 </body>
 </html>
   `;
-
-  if (loadingData) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
-      </View>
-    );
-  }
-
-  return (
-    <ScrollView style={styles.container} keyboardShouldPersistTaps="handled">
-      <Text style={styles.pageTitle}>{isEdit ? t('editLocation') : t('addLocation')}</Text>
-
-      {/* Name EN */}
-      <Text style={[styles.label, { textAlign }]}>{t('locationNameEn')} *</Text>
-      <TextInput style={[styles.input, isRTL && { textAlign: 'right' }]} value={name} onChangeText={setName} />
-
-      {/* Name AR */}
-      <Text style={[styles.label, { textAlign }]}>{t('locationNameAr')} *</Text>
-      <TextInput style={[styles.input, { textAlign: 'right' }]} value={nameAr} onChangeText={setNameAr} />
-
-      {/* Category */}
-      <Text style={[styles.label, { textAlign }]}>{t('category')} *</Text>
-      <TouchableOpacity
-        style={styles.dropdown}
-        onPress={() => setShowCategoryPicker(!showCategoryPicker)}
-      >
-        <Text style={[styles.dropdownText, !category && { color: colors.mediumGrey }]}>
-          {category ? t(category) : t('selectCategory')}
-        </Text>
-        <Ionicons name="chevron-down" size={20} color={colors.darkGrey} />
-      </TouchableOpacity>
-      {showCategoryPicker && (
-        <View style={styles.pickerList}>
-          {CATEGORIES.map((cat) => (
-            <TouchableOpacity
-              key={cat}
-              style={[styles.pickerItem, category === cat && styles.pickerItemActive]}
-              onPress={() => { setCategory(cat); setShowCategoryPicker(false); }}
-            >
-              <Text style={[styles.pickerItemText, category === cat && { color: colors.primary, fontWeight: fontWeights.bold }]}>
-                {t(cat)}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-
-      {/* Address EN */}
-      <Text style={[styles.label, { textAlign }]}>{t('addressEn')}</Text>
-      <TextInput style={[styles.input, isRTL && { textAlign: 'right' }]} value={address} onChangeText={setAddress} />
-
-      {/* Address AR */}
-      <Text style={[styles.label, { textAlign }]}>{t('addressAr')}</Text>
-      <TextInput style={[styles.input, { textAlign: 'right' }]} value={addressAr} onChangeText={setAddressAr} />
-
-      {/* Description EN */}
-      <Text style={[styles.label, { textAlign }]}>{t('descriptionEn')}</Text>
-      <TextInput style={[styles.input, styles.textArea]} value={description} onChangeText={setDescription} multiline />
-
-      {/* Description AR */}
-      <Text style={[styles.label, { textAlign }]}>{t('descriptionAr')}</Text>
-      <TextInput style={[styles.input, styles.textArea, { textAlign: 'right' }]} value={descriptionAr} onChangeText={setDescriptionAr} multiline />
-
-      {/* Map Picker */}
-      <Text style={[styles.label, { textAlign }]}>{t('locationCoordinates')} *</Text>
-      <Text style={styles.hint}>{t('tapMapToSelect')}</Text>
-      <View style={styles.mapContainer}>
-        <WebView
-          ref={webViewRef}
-          source={{ html: pickerHtml }}
-          style={styles.mapPicker}
-          onMessage={onWebViewMessage}
-          javaScriptEnabled
-          domStorageEnabled
-          originWhitelist={['*']}
-        />
-      </View>
-      {latitude !== null && (
-        <Text style={styles.coordText}>
-          Lat: {latitude.toFixed(6)}, Lng: {longitude.toFixed(6)}
-        </Text>
-      )}
-
-      {/* Accessibility Features */}
-      <Text style={[styles.sectionTitle, { textAlign }]}>{t('accessibilityFeatures')}</Text>
-      <View style={styles.featuresGrid}>
-        {FEATURES.map((feat) => (
-          <TouchableOpacity
-            key={feat}
-            style={[styles.featureToggle, selectedFeatures.has(feat) && styles.featureToggleActive]}
-            onPress={() => toggleFeature(feat)}
-          >
-            <Ionicons
-              name={selectedFeatures.has(feat) ? 'checkbox' : 'square-outline'}
-              size={20}
-              color={selectedFeatures.has(feat) ? colors.primary : colors.darkGrey}
-            />
-            <Text style={[styles.featureToggleText, selectedFeatures.has(feat) && { color: colors.primary }]}>
-              {t(feat)}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {/* Photos */}
-      <Text style={[styles.sectionTitle, { textAlign }]}>{t('photos')}</Text>
-      <View style={styles.photoActions}>
-        <TouchableOpacity style={styles.photoBtn} onPress={pickPhotos}>
-          <Ionicons name="images" size={20} color={colors.primary} />
-          <Text style={styles.photoBtnText}>{t('selectPhotos')}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.photoBtn} onPress={takePhoto}>
-          <Ionicons name="camera" size={20} color={colors.primary} />
-          <Text style={styles.photoBtnText}>{t('takePhoto')}</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Existing photos (edit mode) */}
-      {existingPhotos.length > 0 && (
-        <ScrollView horizontal style={styles.photoScroll} showsHorizontalScrollIndicator={false}>
-          {existingPhotos.map((filename, i) => (
-            <Image
-              key={i}
-              source={{ uri: `${UPLOADS_BASE}/${filename}` }}
-              style={styles.photoThumb}
-            />
-          ))}
-        </ScrollView>
-      )}
-
-      {/* New photos */}
-      {photos.length > 0 && (
-        <ScrollView horizontal style={styles.photoScroll} showsHorizontalScrollIndicator={false}>
-          {photos.map((photo, i) => (
-            <View key={i} style={styles.photoThumbContainer}>
-              <Image source={{ uri: photo.uri }} style={styles.photoThumb} />
-              <TouchableOpacity style={styles.photoRemove} onPress={() => removePhoto(i)}>
-                <Ionicons name="close-circle" size={22} color={colors.danger} />
-              </TouchableOpacity>
-            </View>
-          ))}
-        </ScrollView>
-      )}
-
-      {/* Save / Cancel */}
-      <View style={styles.formActions}>
-        <TouchableOpacity style={styles.cancelFormBtn} onPress={() => navigation.goBack()}>
-          <Text style={styles.cancelFormText}>{t('cancel')}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.saveBtn, saving && { opacity: 0.7 }]}
-          onPress={handleSave}
-          disabled={saving}
-        >
-          {saving ? (
-            <ActivityIndicator color={colors.white} />
-          ) : (
-            <>
-              <Ionicons name="checkmark-circle" size={20} color={colors.white} />
-              <Text style={styles.saveBtnText}>{t('save')}</Text>
-            </>
-          )}
-        </TouchableOpacity>
-      </View>
-
-      <View style={{ height: 40 }} />
-    </ScrollView>
-  );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.grey, padding: spacing.xl },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  pageTitle: {
-    fontSize: fontSizes.xxl, fontWeight: fontWeights.bold,
-    color: colors.primary, textAlign: 'center', marginBottom: spacing.xxl,
+  root: { flex: 1 },
+  topBar: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 8,
   },
-  label: {
-    fontSize: fontSizes.md, fontWeight: fontWeights.semibold,
-    color: colors.black, marginBottom: spacing.xs, marginTop: spacing.md,
+  backBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center', alignItems: 'center',
   },
-  input: {
-    backgroundColor: colors.white, borderRadius: borderRadius.md,
-    borderWidth: 2, borderColor: colors.lightGrey, padding: spacing.md,
-    fontSize: fontSizes.md, color: colors.black,
-  },
-  textArea: { minHeight: 100, textAlignVertical: 'top' },
-  hint: { fontSize: fontSizes.sm, color: colors.mediumGrey, marginBottom: spacing.sm },
-  dropdown: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: colors.white, borderRadius: borderRadius.md,
-    borderWidth: 2, borderColor: colors.lightGrey, padding: spacing.md,
-  },
-  dropdownText: { fontSize: fontSizes.md, color: colors.black },
-  pickerList: {
-    backgroundColor: colors.white, borderRadius: borderRadius.md,
-    borderWidth: 1, borderColor: colors.lightGrey, marginTop: 4, maxHeight: 250,
-  },
-  pickerItem: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderBottomWidth: 1, borderBottomColor: colors.grey },
-  pickerItemActive: { backgroundColor: colors.grey },
-  pickerItemText: { fontSize: fontSizes.md, color: colors.black },
+  content: { paddingHorizontal: 20, paddingTop: 8 },
 
-  mapContainer: { height: 250, borderRadius: borderRadius.md, overflow: 'hidden', marginTop: spacing.sm },
-  mapPicker: { flex: 1 },
-  coordText: { fontSize: fontSizes.sm, color: colors.darkGrey, marginTop: spacing.xs, textAlign: 'center' },
-
-  sectionTitle: {
-    fontSize: fontSizes.lg, fontWeight: fontWeights.bold,
-    color: colors.primary, marginTop: spacing.xxl, marginBottom: spacing.md,
+  pickerBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 14,
+    borderWidth: 1.5,
+    marginBottom: 16,
+    minHeight: 52,
   },
-  featuresGrid: { gap: spacing.sm },
-  featureToggle: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    backgroundColor: colors.white, borderRadius: borderRadius.md,
-    padding: spacing.md, borderWidth: 1, borderColor: colors.lightGrey,
-  },
-  featureToggleActive: { borderColor: colors.primary, backgroundColor: 'rgba(128,0,0,0.03)' },
-  featureToggleText: { fontSize: fontSizes.md, color: colors.darkGrey },
 
-  photoActions: { flexDirection: 'row', gap: spacing.md },
+  suggestionsContainer: {
+    borderWidth: 1,
+    borderRadius: 8,
+    marginBottom: 12,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+
+  mapContainer: {
+    height: 240,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    marginBottom: 16,
+  },
+  map: { flex: 1 },
+
+  chipFlow: {
+    flexDirection: 'row', flexWrap: 'wrap',
+    gap: 8, marginBottom: 16,
+  },
+
+  photoActions: { flexDirection: 'row', gap: 10, marginBottom: 12 },
   photoBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: spacing.md, borderRadius: borderRadius.md,
-    backgroundColor: colors.white, borderWidth: 2, borderColor: colors.primary, borderStyle: 'dashed',
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    minHeight: 44,
   },
-  photoBtnText: { fontSize: fontSizes.sm, fontWeight: fontWeights.semibold, color: colors.primary },
-  photoScroll: { marginTop: spacing.md },
-  photoThumbContainer: { position: 'relative', marginRight: spacing.sm },
-  photoThumb: { width: 100, height: 100, borderRadius: borderRadius.md },
-  photoRemove: { position: 'absolute', top: -6, right: -6 },
+  photoWrap: { position: 'relative' },
+  photo: { width: 100, height: 100 },
+  photoRemove: {
+    position: 'absolute',
+    top: 4, right: 4,
+    width: 22, height: 22, borderRadius: 11,
+    justifyContent: 'center', alignItems: 'center',
+  },
 
-  formActions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.xxl },
-  cancelFormBtn: {
-    flex: 1, paddingVertical: spacing.lg, borderRadius: borderRadius.md,
-    backgroundColor: colors.lightGrey, alignItems: 'center',
+  catRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 12,
+    minHeight: 52, marginBottom: 4,
   },
-  cancelFormText: { fontSize: fontSizes.md, fontWeight: fontWeights.semibold, color: colors.darkGrey },
-  saveBtn: {
-    flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: spacing.lg, borderRadius: borderRadius.md,
-    backgroundColor: colors.primary,
+  catIconBox: {
+    width: 32, height: 32, borderRadius: 10,
+    justifyContent: 'center', alignItems: 'center',
   },
-  saveBtnText: { fontSize: fontSizes.md, fontWeight: fontWeights.bold, color: colors.white },
 });

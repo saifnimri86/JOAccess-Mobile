@@ -1,123 +1,80 @@
 /**
- * API Service
- * ===========
- * Central HTTP client for all communication with the Flask backend.
- * Handles JWT token storage/refresh, request formatting, and error handling.
- * 
- * Uses expo-secure-store for token persistence (encrypted on-device storage).
+ * API Service (Phase 1.5)
+ * =======================
+ * Same API surface as before, BUT `getLocations()` now has offline
+ * fallback behavior:
+ *
+ *   1. Try network request as normal
+ *   2. On success: cache the response + return it
+ *   3. On network failure: return cached data if any, with a flag
+ *
+ * All other endpoints behave the same — they still throw on failure
+ * because it wouldn't make sense to fake a login or a write.
+ *
+ * Auth token management, refresh flow, and all other endpoints are
+ * unchanged from the original api.js.
  */
 
-import * as SecureStore from 'expo-secure-store';
+import EncryptedStorage from 'react-native-encrypted-storage';
 import { API_BASE } from '../config';
+import { cacheLocations, getCachedLocations } from './cache';
 
 // ─────────────────────────────────────────────
-// Token Management
+// Token Management (unchanged)
 // ─────────────────────────────────────────────
-
-const TOKEN_KEY = 'joaccess_access_token';
+const TOKEN_KEY         = 'joaccess_access_token';
 const REFRESH_TOKEN_KEY = 'joaccess_refresh_token';
-const USER_KEY = 'joaccess_user';
+const USER_KEY          = 'joaccess_user';
 
-/**
- * Store both tokens securely on the device.
- */
 export async function storeTokens(accessToken, refreshToken) {
-  await SecureStore.setItemAsync(TOKEN_KEY, accessToken);
+  await EncryptedStorage.setItem(TOKEN_KEY, accessToken);
   if (refreshToken) {
-    await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshToken);
+    await EncryptedStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   }
 }
 
-/**
- * Retrieve the stored access token.
- */
 export async function getAccessToken() {
-  try {
-    return await SecureStore.getItemAsync(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  try { return await EncryptedStorage.getItem(TOKEN_KEY); } catch { return null; }
 }
 
-/**
- * Retrieve the stored refresh token.
- */
 export async function getRefreshToken() {
-  try {
-    return await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  try { return await EncryptedStorage.getItem(REFRESH_TOKEN_KEY); } catch { return null; }
 }
 
-/**
- * Store user data as JSON string.
- */
 export async function storeUser(user) {
-  await SecureStore.setItemAsync(USER_KEY, JSON.stringify(user));
+  await EncryptedStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
-/**
- * Retrieve stored user data.
- */
 export async function getStoredUser() {
   try {
-    const data = await SecureStore.getItemAsync(USER_KEY);
+    const data = await EncryptedStorage.getItem(USER_KEY);
     return data ? JSON.parse(data) : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/**
- * Clear all stored auth data (logout).
- */
 export async function clearAuth() {
-  await SecureStore.deleteItemAsync(TOKEN_KEY);
-  await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
-  await SecureStore.deleteItemAsync(USER_KEY);
+  await EncryptedStorage.removeItem(TOKEN_KEY);
+  await EncryptedStorage.removeItem(REFRESH_TOKEN_KEY);
+  await EncryptedStorage.removeItem(USER_KEY);
 }
 
 // ─────────────────────────────────────────────
-// HTTP Helper
+// Core request helper (unchanged logic, just cleaner)
 // ─────────────────────────────────────────────
-
-/**
- * Make an authenticated API request.
- * Automatically includes the JWT Bearer token in the Authorization header.
- * If the token is expired (401), attempts to refresh it once and retry.
- * 
- * @param {string} endpoint - Path relative to API_BASE (e.g. '/locations')
- * @param {object} options - fetch options (method, body, headers, etc.)
- * @returns {Promise<object>} - The parsed JSON response
- * @throws {object} - { status, message, data } on error
- */
 async function apiRequest(endpoint, options = {}) {
   const url = `${API_BASE}${endpoint}`;
+  const headers = { ...(options.headers || {}) };
 
-  // Build headers
-  const headers = {
-    ...(options.headers || {}),
-  };
-
-  // Only set Content-Type to JSON if we're not sending FormData
   if (!(options.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
   }
 
-  // Attach the JWT token if available
   const token = await getAccessToken();
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const fetchOptions = {
-    ...options,
-    headers,
-  };
-
-  // If body is a plain object, stringify it (unless it's FormData)
-  if (fetchOptions.body && !(fetchOptions.body instanceof FormData) && typeof fetchOptions.body === 'object') {
+  const fetchOptions = { ...options, headers };
+  if (fetchOptions.body && !(fetchOptions.body instanceof FormData)
+      && typeof fetchOptions.body === 'object') {
     fetchOptions.body = JSON.stringify(fetchOptions.body);
   }
 
@@ -125,41 +82,25 @@ async function apiRequest(endpoint, options = {}) {
   try {
     response = await fetch(url, fetchOptions);
   } catch (networkError) {
-    throw {
-      status: 0,
-      message: 'Network error. Please check your connection and server URL.',
-      data: null,
-    };
+    throw { status: 0, message: 'Network error. Please check your connection.', data: null };
   }
 
-  // If 401, try refreshing the token
   if (response.status === 401 && token) {
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      // Retry the original request with the new token
       const newToken = await getAccessToken();
       headers['Authorization'] = `Bearer ${newToken}`;
       fetchOptions.headers = headers;
-
       try {
         response = await fetch(url, fetchOptions);
-      } catch (networkError) {
-        throw {
-          status: 0,
-          message: 'Network error after token refresh.',
-          data: null,
-        };
+      } catch {
+        throw { status: 0, message: 'Network error after token refresh.', data: null };
       }
     }
   }
 
-  // Parse the response
   let data;
-  try {
-    data = await response.json();
-  } catch {
-    data = null;
-  }
+  try { data = await response.json(); } catch { data = null; }
 
   if (!response.ok) {
     throw {
@@ -172,56 +113,35 @@ async function apiRequest(endpoint, options = {}) {
   return data;
 }
 
-/**
- * Attempt to refresh the access token using the refresh token.
- * @returns {boolean} true if refresh succeeded
- */
 async function tryRefreshToken() {
   const refreshToken = await getRefreshToken();
   if (!refreshToken) return false;
-
   try {
     const response = await fetch(`${API_BASE}/auth/refresh`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${refreshToken}`,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${refreshToken}` },
     });
-
     if (response.ok) {
       const data = await response.json();
-      await SecureStore.setItemAsync(TOKEN_KEY, data.access_token);
+      await EncryptedStorage.setItem(TOKEN_KEY, data.access_token);
       return true;
     }
-  } catch {
-    // Refresh failed — user needs to re-login
-  }
-
+  } catch {}
   return false;
 }
 
 // ─────────────────────────────────────────────
-// AUTH API
+// AUTH
 // ─────────────────────────────────────────────
-
 export async function login(email, password) {
-  const data = await apiRequest('/auth/login', {
-    method: 'POST',
-    body: { email, password },
-  });
-
+  const data = await apiRequest('/auth/login', { method: 'POST', body: { email, password } });
   await storeTokens(data.access_token, data.refresh_token);
   await storeUser(data.user);
-
   return data;
 }
 
 export async function signup(userData) {
-  return apiRequest('/auth/signup', {
-    method: 'POST',
-    body: userData,
-  });
+  return apiRequest('/auth/signup', { method: 'POST', body: userData });
 }
 
 export async function getMe() {
@@ -229,20 +149,49 @@ export async function getMe() {
 }
 
 // ─────────────────────────────────────────────
-// LOCATIONS API
+// LOCATIONS — now with cache fallback
 // ─────────────────────────────────────────────
-
+/**
+ * Fetch locations with optional filters.
+ *
+ * Network-first strategy:
+ *   1. Try the API. If it works, cache and return fresh data.
+ *   2. If network fails, return whatever's in the cache — the caller
+ *      gets a `_fromCache: true` marker attached to the array so the
+ *      UI can show a banner.
+ *
+ * Filters are sent to the API but ignored when falling back to cache —
+ * the cached list contains everything, and the UI re-applies filters
+ * client-side anyway (see MapScreen's filteredLocations useMemo).
+ */
 export async function getLocations(filters = {}) {
   const params = new URLSearchParams();
   if (filters.category) params.append('category', filters.category);
-  if (filters.feature) params.append('feature', filters.feature);
+  if (filters.feature)  params.append('feature',  filters.feature);
   if (filters.verified !== undefined) params.append('verified', filters.verified);
-  if (filters.search) params.append('search', filters.search);
-
+  if (filters.search)   params.append('search',   filters.search);
   const queryString = params.toString();
-  const endpoint = `/locations${queryString ? `?${queryString}` : ''}`;
 
-  return apiRequest(endpoint);
+  try {
+    const data = await apiRequest(`/locations${queryString ? `?${queryString}` : ''}`);
+    // Success: write-through cache and return
+    await cacheLocations(data);
+    return data;
+  } catch (err) {
+    // Only fall back to cache on network errors (status 0). For 4xx/5xx we
+    // want the UI to surface the real error instead of silently hiding it.
+    if (err && err.status === 0) {
+      const cached = await getCachedLocations();
+      if (cached && cached.locations) {
+        // Attach non-enumerable markers the UI can read
+        const result = cached.locations.slice();
+        result._fromCache = true;
+        result._lastUpdated = cached.lastUpdated;
+        return result;
+      }
+    }
+    throw err;
+  }
 }
 
 export async function getLocation(locationId) {
@@ -250,23 +199,15 @@ export async function getLocation(locationId) {
 }
 
 export async function createLocation(locationData) {
-  return apiRequest('/locations', {
-    method: 'POST',
-    body: locationData,
-  });
+  return apiRequest('/locations', { method: 'POST', body: locationData });
 }
 
 export async function updateLocation(locationId, locationData) {
-  return apiRequest(`/locations/${locationId}`, {
-    method: 'PUT',
-    body: locationData,
-  });
+  return apiRequest(`/locations/${locationId}`, { method: 'PUT', body: locationData });
 }
 
 export async function deleteLocation(locationId) {
-  return apiRequest(`/locations/${locationId}`, {
-    method: 'DELETE',
-  });
+  return apiRequest(`/locations/${locationId}`, { method: 'DELETE' });
 }
 
 export async function getMyLocations() {
@@ -274,9 +215,8 @@ export async function getMyLocations() {
 }
 
 // ─────────────────────────────────────────────
-// REVIEWS API
+// REVIEWS
 // ─────────────────────────────────────────────
-
 export async function addReview(locationId, rating, comment) {
   return apiRequest(`/locations/${locationId}/reviews`, {
     method: 'POST',
@@ -285,17 +225,15 @@ export async function addReview(locationId, rating, comment) {
 }
 
 export async function deleteReview(reviewId, reason = null) {
-  const body = reason ? { reason } : {};
   return apiRequest(`/reviews/${reviewId}`, {
     method: 'DELETE',
-    body,
+    body: reason ? { reason } : {},
   });
 }
 
 // ─────────────────────────────────────────────
-// REPORTS API
+// REPORTS
 // ─────────────────────────────────────────────
-
 export async function reportLocation(locationId, reason, description) {
   return apiRequest(`/locations/${locationId}/report`, {
     method: 'POST',
@@ -304,27 +242,19 @@ export async function reportLocation(locationId, reason, description) {
 }
 
 // ─────────────────────────────────────────────
-// CHATBOT API
+// CHATBOT
 // ─────────────────────────────────────────────
-
 export async function sendChatMessage(message, lang = 'en') {
-  return apiRequest('/chatbot', {
-    method: 'POST',
-    body: { message, lang },
-  });
+  return apiRequest('/chatbot', { method: 'POST', body: { message, lang } });
 }
 
 // ─────────────────────────────────────────────
-// ACCESSIBILITY SETTINGS API
+// ACCESSIBILITY SETTINGS
 // ─────────────────────────────────────────────
-
 export async function getAccessibilitySettings() {
   return apiRequest('/accessibility-settings');
 }
 
 export async function updateAccessibilitySettings(settings) {
-  return apiRequest('/accessibility-settings', {
-    method: 'PUT',
-    body: settings,
-  });
+  return apiRequest('/accessibility-settings', { method: 'PUT', body: settings });
 }

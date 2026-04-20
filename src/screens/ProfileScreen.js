@@ -1,28 +1,54 @@
-import React, { useState, useEffect, useCallback } from 'react';
+/**
+ * ProfileScreen (Phase 1.5)
+ * =========================
+ * Redesigned with:
+ *   - Glass header card with avatar initial, username, email
+ *   - Stats pill row (locations added, verified count)
+ *   - "My Locations" list with staggered reveals
+ *   - Pull-to-refresh with brand-colored spinner
+ *   - Not-logged-in empty state with big primary CTA
+ *   - Logout in a ghost button at the bottom
+ *
+ * All existing logic preserved: loads via useFocusEffect, supports pull-to-
+ * refresh, delete with confirmation, navigates to Edit on tap.
+ */
+
+import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Alert, ActivityIndicator, RefreshControl, Image,
+  View, Text, StyleSheet, ScrollView, RefreshControl,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useAccessibility } from '../context/AccessibilityContext';
+import { useDialog } from '../context/DialogContext';
 import * as api from '../services/api';
 import { UPLOADS_BASE } from '../config';
-import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../utils/theme';
+
+import AnimatedPressable from '../components/AnimatedPressable';
+import PrimaryButton from '../components/PrimaryButton';
+import SectionHeader from '../components/SectionHeader';
+import StaggeredReveal from '../components/StaggeredReveal';
+import SkeletonLoader from '../components/SkeletonLoader';
+import ThemeCard from '../components/ThemeCard';
 
 export default function ProfileScreen({ navigation }) {
   const { user, isAuthenticated, logout } = useAuth();
-  const { t, isRTL, getLocalized } = useLanguage();
+  const { t, isRTL, lang, getLocalized } = useLanguage();
+  const { theme, scale, announce } = useAccessibility();
+  const { showDialog } = useDialog();
 
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Reload locations every time the screen comes into focus
   useFocusEffect(
     useCallback(() => {
       if (isAuthenticated) loadMyLocations();
+      else setLoading(false);
     }, [isAuthenticated])
   );
 
@@ -30,339 +56,389 @@ export default function ProfileScreen({ navigation }) {
     try {
       const data = await api.getMyLocations();
       setLocations(data);
-    } catch (err) {
-      // silently fail
+    } catch {
+      // silent fail
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }
 
-  function onRefresh() {
-    setRefreshing(true);
-    loadMyLocations();
-  }
+  const onRefresh = () => { setRefreshing(true); loadMyLocations(); };
 
-  async function handleDelete(locationId) {
-    Alert.alert(
+  const handleDelete = (locationId, name) => {
+    showDialog(
       t('delete'),
       t('deleteConfirm'),
       [
         { text: t('cancel'), style: 'cancel' },
         {
-          text: t('delete'),
-          style: 'destructive',
+          text: t('delete'), style: 'destructive',
           onPress: async () => {
             try {
               await api.deleteLocation(locationId);
-              Alert.alert(t('success'), t('locationDeleted'));
+              announce(lang === 'ar' ? 'تم الحذف' : 'Deleted');
               loadMyLocations();
             } catch (err) {
-              Alert.alert(t('error'), err.message || 'Delete failed');
+              showDialog(t('error'), err.message || 'Delete failed');
             }
           },
         },
       ]
     );
-  }
+  };
 
   // ── Not logged in ──
   if (!isAuthenticated) {
     return (
-      <View style={styles.centerContainer}>
-        <Ionicons name="person-circle-outline" size={80} color={colors.lightGrey} />
-        <Text style={styles.emptyText}>{t('loginToViewProfile')}</Text>
-        <TouchableOpacity
-          style={styles.primaryBtn}
-          onPress={() => navigation.navigate('Login')}
-        >
-          <Text style={styles.primaryBtnText}>{t('login')}</Text>
-        </TouchableOpacity>
+      <View style={[styles.root, { backgroundColor: theme.color.bg }]}>
+        <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
+          <View style={styles.centerContainer}>
+            <View style={[styles.bigIconBox, {
+              backgroundColor: theme.color.brandMuted,
+              borderRadius: 80,
+            }]}>
+              <Ionicons name="person-circle-outline" size={80} color={theme.color.textBrand} />
+            </View>
+            <Text style={{
+              fontSize: scale(theme.fontSizes.xl),
+              fontWeight: theme.fontWeights.bold,
+              color: theme.color.text,
+              marginTop: 20, textAlign: 'center',
+              fontFamily: theme.fontFamily,
+            }}>
+              {lang === 'ar' ? 'سجّل للوصول لملفك الشخصي' : 'Sign in to view your profile'}
+            </Text>
+            <Text style={{
+              fontSize: scale(theme.fontSizes.md),
+              color: theme.color.textMuted,
+              marginTop: 8, marginBottom: 28, textAlign: 'center',
+              fontFamily: theme.fontFamily, paddingHorizontal: 40,
+            }}>
+              {lang === 'ar'
+                ? 'أضِف أماكن، قيّم، وأبلغ عن مشاكل بعد تسجيل الدخول.'
+                : 'Add locations, rate, and report issues when signed in.'}
+            </Text>
+            <View style={{ width: '80%' }}>
+              <PrimaryButton
+                label={t('login')}
+                icon="log-in-outline"
+                onPress={() => navigation.navigate('Login')}
+              />
+              <View style={{ height: 10 }} />
+              <PrimaryButton
+                label={t('signup')}
+                icon="person-add-outline"
+                variant="secondary"
+                onPress={() => navigation.navigate('Signup')}
+              />
+            </View>
+          </View>
+        </SafeAreaView>
       </View>
     );
   }
 
   const initial = user?.username ? user.username[0].toUpperCase() : '?';
-  const memberDate = user?.created_at
-    ? new Date(user.created_at).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
-    : '';
+  const verifiedCount = locations.filter(l => l.is_verified).length;
 
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />}
-    >
-      {/* Profile Header Card */}
-      <View style={styles.headerCard}>
-        <View style={styles.profileRow}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{initial}</Text>
-          </View>
-          <View style={styles.profileInfo}>
-            <Text style={styles.userName}>{user.username}</Text>
-            <Text style={styles.userEmail}>{user.email}</Text>
-            <View style={styles.badge}>
-              <Ionicons
-                name={user.user_type === 'organization' ? 'business' : 'person'}
-                size={14}
-                color={colors.white}
+    <View style={[styles.root, { backgroundColor: theme.color.bg }]}>
+      <SafeAreaView style={styles.root} edges={['top', 'left', 'right']}>
+        <ScrollView
+          contentContainerStyle={[styles.content, { paddingBottom: 96 }]}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={theme.color.brand}
+              colors={[theme.color.brand]}
+            />
+          }
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Header card */}
+          <StaggeredReveal index={0}>
+            <ThemeCard style={[
+              styles.headerCard,
+              {
+                backgroundColor: theme.color.brand,
+                borderRadius: theme.radii.xl,
+                ...theme.elevation.md,
+              },
+            ]}>
+              <View style={[styles.avatarCircle, { backgroundColor: 'rgba(255,255,255,0.2)' }]}>
+                <Text style={{
+                  fontSize: 34, fontWeight: '800', color: '#FFFFFF',
+                  fontFamily: theme.fontFamily,
+                }}>{initial}</Text>
+              </View>
+              <Text style={{
+                fontSize: scale(theme.fontSizes.xl),
+                fontWeight: theme.fontWeights.heavy,
+                color: '#FFFFFF', marginTop: 12,
+                fontFamily: theme.fontFamily,
+              }}>{user?.username}</Text>
+              <Text style={{
+                fontSize: scale(theme.fontSizes.sm),
+                color: 'rgba(255,255,255,0.85)', marginTop: 2,
+                fontFamily: theme.fontFamily,
+              }}>{user?.email}</Text>
+              {user?.user_type === 'organization' && user?.organization_name ? (
+                <View style={styles.orgBadge}>
+                  <Ionicons name="business" size={12} color="#FFFFFF" />
+                  <Text style={{
+                    color: '#FFFFFF', marginLeft: 6,
+                    fontSize: scale(theme.fontSizes.xs),
+                    fontWeight: theme.fontWeights.semibold,
+                    fontFamily: theme.fontFamily,
+                  }}>{user.organization_name}</Text>
+                </View>
+              ) : null}
+            </ThemeCard>
+          </StaggeredReveal>
+
+          {/* Stats */}
+          <StaggeredReveal index={1}>
+            <View style={styles.statsRow}>
+              <StatCard value={locations.length} label={lang === 'ar' ? 'أماكن مضافة' : 'Added'} icon="pin" />
+              <StatCard value={verifiedCount} label={lang === 'ar' ? 'موثّقة' : 'Verified'} icon="checkmark-circle" tone="success" />
+            </View>
+          </StaggeredReveal>
+
+          {/* Add new location CTA */}
+          <StaggeredReveal index={2}>
+            <View style={{ marginTop: 20, marginBottom: 10 }}>
+              <PrimaryButton
+                label={t('addLocation') || (lang === 'ar' ? 'إضافة مكان' : 'Add a location')}
+                icon="add-circle-outline"
+                onPress={() => navigation.navigate('AddLocation')}
               />
-              <Text style={styles.badgeText}>
-                {t(user.user_type || 'individual')}
-                {user.organization_name ? ` - ${user.organization_name}` : ''}
+            </View>
+          </StaggeredReveal>
+
+          {/* My locations list */}
+          <StaggeredReveal index={3}>
+            <View style={{ marginTop: 24 }}>
+              <SectionHeader
+                title={lang === 'ar' ? 'أماكني' : 'My locations'}
+                icon="list"
+                subtitle={loading ? (lang === 'ar' ? 'جاري التحميل…' : 'Loading…') :
+                  `${locations.length} ${locations.length === 1 ? 'entry' : 'entries'}`}
+                align={isRTL ? 'right' : 'left'}
+              />
+            </View>
+          </StaggeredReveal>
+
+          {loading ? (
+            <>
+              <SkeletonLoader height={80} style={{ marginBottom: 10 }} />
+              <SkeletonLoader height={80} style={{ marginBottom: 10 }} />
+              <SkeletonLoader height={80} style={{ marginBottom: 10 }} />
+            </>
+          ) : locations.length === 0 ? (
+            <ThemeCard style={[
+              styles.emptyState,
+              { backgroundColor: theme.color.surface, borderColor: theme.color.border, borderRadius: theme.radii.lg },
+            ]}>
+              <Ionicons name="map-outline" size={40} color={theme.color.textMuted} />
+              <Text style={{
+                color: theme.color.textMuted,
+                fontSize: scale(theme.fontSizes.md),
+                marginTop: 10, textAlign: 'center',
+                fontFamily: theme.fontFamily,
+              }}>
+                {lang === 'ar' ? 'لم تضِف أي مكان بعد.' : "You haven't added any locations yet."}
               </Text>
-            </View>
-          </View>
-        </View>
+            </ThemeCard>
+          ) : (
+            locations.map((loc, i) => (
+              <StaggeredReveal key={loc.id} index={4 + i}>
+                <LocationRow
+                  location={loc}
+                  name={getLocalized(loc, 'name')}
+                  onEdit={() => navigation.navigate('EditLocation', { locationId: loc.id })}
+                  onDelete={() => handleDelete(loc.id, getLocalized(loc, 'name'))}
+                />
+              </StaggeredReveal>
+            ))
+          )}
 
-        {/* Stats */}
-        <View style={styles.statsRow}>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>{locations.length}</Text>
-            <Text style={styles.statLabel}>{t('locationsAdded')}</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>{user.review_count || 0}</Text>
-            <Text style={styles.statLabel}>{t('reviews')}</Text>
-          </View>
-          <View style={styles.statBox}>
-            <Text style={styles.statNumber}>{memberDate}</Text>
-            <Text style={styles.statLabel}>{t('memberSince')}</Text>
-          </View>
+          {/* Logout */}
+          <StaggeredReveal index={locations.length + 5}>
+            <View style={{ marginTop: 24 }}>
+              <PrimaryButton
+                label={t('logout')}
+                icon="log-out-outline"
+                variant="ghost"
+                onPress={() => {
+                  showDialog(
+                    t('logout'),
+                    lang === 'ar' ? 'هل أنت متأكد؟' : 'Are you sure?',
+                    [
+                      { text: t('cancel'), style: 'cancel' },
+                      { text: t('logout'), style: 'destructive', onPress: logout },
+                    ]
+                  );
+                }}
+              />
+            </View>
+          </StaggeredReveal>
+        </ScrollView>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+function StatCard({ value, label, icon, tone = 'brand' }) {
+  const { theme, scale } = useAccessibility();
+  const accentColor = tone === 'success' ? theme.color.success : theme.color.brand;
+  return (
+    <ThemeCard style={[
+      styles.statCard,
+      {
+        backgroundColor: theme.color.surface,
+        borderColor: theme.color.border,
+        borderRadius: theme.radii.lg,
+        ...theme.elevation.sm,
+      },
+    ]}>
+      <View style={[styles.statIconBox, { backgroundColor: theme.color.brandMuted }]}>
+        <Ionicons name={icon} size={18} color={accentColor} />
+      </View>
+      <Text style={{
+        fontSize: scale(theme.fontSizes.xxl),
+        fontWeight: theme.fontWeights.heavy,
+        color: theme.color.text, marginTop: 6,
+        fontFamily: theme.fontFamily,
+      }}>{value}</Text>
+      <Text style={{
+        fontSize: scale(theme.fontSizes.xs),
+        fontWeight: theme.fontWeights.semibold,
+        color: theme.color.textMuted, marginTop: 2,
+        fontFamily: theme.fontFamily,
+        textTransform: 'uppercase', letterSpacing: 0.8,
+      }}>{label}</Text>
+    </ThemeCard>
+  );
+}
+
+function LocationRow({ location, name, onEdit, onDelete }) {
+  const { theme, scale } = useAccessibility();
+  const { t, lang } = useLanguage();
+  return (
+    <ThemeCard style={[
+      styles.locationRow,
+      {
+        backgroundColor: theme.color.surface,
+        borderColor: theme.color.border,
+        borderRadius: theme.radii.md,
+        ...theme.elevation.sm,
+      },
+    ]}>
+      <View style={{ flex: 1 }}>
+        <Text style={{
+          fontSize: scale(theme.fontSizes.md),
+          fontWeight: theme.fontWeights.bold,
+          color: theme.color.text,
+          fontFamily: theme.fontFamily,
+        }} numberOfLines={1}>{name}</Text>
+        <View style={styles.locationMetaRow}>
+          <Ionicons
+            name={location.is_verified ? 'checkmark-circle' : 'time'}
+            size={14}
+            color={location.is_verified ? theme.color.success : theme.color.warning}
+          />
+          <Text style={{
+            fontSize: scale(theme.fontSizes.xs),
+            color: location.is_verified ? theme.color.success : theme.color.warning,
+            marginLeft: 4, fontFamily: theme.fontFamily,
+            fontWeight: theme.fontWeights.semibold,
+          }}>{location.is_verified ? t('verified') : t('unverified')}</Text>
+          <Text style={{
+            fontSize: scale(theme.fontSizes.xs),
+            color: theme.color.textMuted,
+            marginLeft: 12, fontFamily: theme.fontFamily,
+          }}>{t(location.category)}</Text>
         </View>
       </View>
-
-      {/* My Locations */}
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>{t('myLocations')}</Text>
-          <TouchableOpacity
-            style={styles.addBtn}
-            onPress={() => navigation.navigate('AddLocation')}
-          >
-            <Ionicons name="add-circle" size={20} color={colors.white} />
-            <Text style={styles.addBtnText}>{t('addLocation')}</Text>
-          </TouchableOpacity>
-        </View>
-
-        {loading ? (
-          <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
-        ) : locations.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Ionicons name="location-outline" size={60} color={colors.lightGrey} />
-            <Text style={styles.emptyTitle}>{t('noLocationsYet')}</Text>
-            <Text style={styles.emptySubtitle}>{t('startContributing')}</Text>
-            <TouchableOpacity
-              style={[styles.primaryBtn, { marginTop: spacing.lg }]}
-              onPress={() => navigation.navigate('AddLocation')}
-            >
-              <Ionicons name="add-circle" size={20} color={colors.white} />
-              <Text style={styles.primaryBtnText}>{t('addLocation')}</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          locations.map((loc) => (
-            <View key={loc.id} style={styles.locationCard}>
-              {/* Card image or placeholder */}
-              <View style={styles.cardImage}>
-                {loc.photos?.length > 0 ? (
-                  <Image
-                    source={{ uri: `${UPLOADS_BASE}/${loc.photos[0]}` }}
-                    style={styles.cardImageFull}
-                    resizeMode="cover"
-                  />
-                ) : (
-                  <Ionicons name="location" size={40} color={colors.primary} />
-                )}
-              </View>
-
-              <View style={styles.cardContent}>
-                <View style={styles.cardCategoryRow}>
-                  <View style={styles.categoryTag}>
-                    <Text style={styles.categoryTagText}>{t(loc.category)}</Text>
-                  </View>
-                  <View style={[styles.verifiedTag, !loc.is_verified && styles.unverifiedTag]}>
-                    <Text style={[styles.verifiedTagText, !loc.is_verified && styles.unverifiedTagText]}>
-                      {loc.is_verified ? t('verified') : t('unverified')}
-                    </Text>
-                  </View>
-                </View>
-
-                <Text style={styles.cardName}>{getLocalized(loc, 'name')}</Text>
-                <Text style={styles.cardAddress} numberOfLines={1}>
-                  <Ionicons name="location-outline" size={14} color={colors.darkGrey} />{' '}
-                  {getLocalized(loc, 'address')}
-                </Text>
-
-                {/* Feature tags */}
-                {loc.accessibility_features?.length > 0 && (
-                  <View style={styles.featureRow}>
-                    {loc.accessibility_features.slice(0, 3).map((f, i) => (
-                      <View key={i} style={styles.featureChip}>
-                        <Ionicons name="checkmark" size={12} color={colors.success} />
-                        <Text style={styles.featureChipText}>{t(f.type)}</Text>
-                      </View>
-                    ))}
-                    {loc.accessibility_features.length > 3 && (
-                      <View style={styles.featureChip}>
-                        <Text style={styles.featureChipText}>+{loc.accessibility_features.length - 3}</Text>
-                      </View>
-                    )}
-                  </View>
-                )}
-
-                {/* Actions */}
-                <View style={styles.cardActions}>
-                  <TouchableOpacity
-                    style={styles.cardActionBtn}
-                    onPress={() => navigation.navigate('EditLocation', { locationId: loc.id })}
-                  >
-                    <Ionicons name="create-outline" size={16} color={colors.primary} />
-                    <Text style={styles.cardActionText}>{t('edit')}</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.cardActionBtn, styles.cardActionDanger]}
-                    onPress={() => handleDelete(loc.id)}
-                  >
-                    <Ionicons name="trash-outline" size={16} color={colors.danger} />
-                    <Text style={[styles.cardActionText, { color: colors.danger }]}>{t('delete')}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-          ))
-        )}
-      </View>
-
-      {/* Logout */}
-      <TouchableOpacity style={styles.logoutBtn} onPress={logout}>
-        <Ionicons name="log-out-outline" size={20} color={colors.danger} />
-        <Text style={styles.logoutText}>{t('logout')}</Text>
-      </TouchableOpacity>
-
-      <View style={{ height: 40 }} />
-    </ScrollView>
+      <AnimatedPressable
+        onPress={onEdit}
+        accessibilityLabel={t('edit') || (lang === 'ar' ? 'تعديل' : 'Edit')}
+        hitSlop={8}
+        style={styles.locationAction}
+      >
+        <Ionicons name="create-outline" size={20} color={theme.color.textBrand} />
+      </AnimatedPressable>
+      <AnimatedPressable
+        onPress={onDelete}
+        accessibilityLabel={t('delete')}
+        hitSlop={8}
+        style={styles.locationAction}
+      >
+        <Ionicons name="trash-outline" size={20} color={theme.color.danger} />
+      </AnimatedPressable>
+    </ThemeCard>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.grey },
-  centerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: spacing.xxl },
-  emptyText: { fontSize: fontSizes.lg, color: colors.darkGrey, marginTop: spacing.lg, marginBottom: spacing.xl },
+  root: { flex: 1 },
+  content: { paddingHorizontal: 20, paddingTop: 12 },
 
-  // ── Header card ──
-  headerCard: {
-    backgroundColor: colors.primary, marginHorizontal: spacing.lg,
-    marginTop: spacing.lg, borderRadius: borderRadius.xl, padding: spacing.xl,
-    shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3, shadowRadius: 10, elevation: 6,
+  centerContainer: {
+    flex: 1, justifyContent: 'center', alignItems: 'center',
+    padding: 24,
   },
-  profileRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.lg },
-  avatar: {
-    width: 70, height: 70, borderRadius: 35,
-    backgroundColor: colors.white, justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2, shadowRadius: 4, elevation: 3,
-  },
-  avatarText: { fontSize: fontSizes.xxxl, fontWeight: fontWeights.bold, color: colors.primary },
-  profileInfo: { flex: 1 },
-  userName: { fontSize: fontSizes.xl, fontWeight: fontWeights.bold, color: colors.white },
-  userEmail: { fontSize: fontSizes.sm, color: 'rgba(255,255,255,0.8)', marginBottom: spacing.xs },
-  badge: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: spacing.md,
-    paddingVertical: 3, borderRadius: borderRadius.round, alignSelf: 'flex-start',
-  },
-  badgeText: { fontSize: fontSizes.xs, color: colors.white },
-  statsRow: { flexDirection: 'row', marginTop: spacing.xl, gap: spacing.sm },
-  statBox: {
-    flex: 1, backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: borderRadius.md, padding: spacing.md, alignItems: 'center',
-  },
-  statNumber: { fontSize: fontSizes.xl, fontWeight: fontWeights.bold, color: colors.white },
-  statLabel: { fontSize: fontSizes.xs, color: 'rgba(255,255,255,0.8)', marginTop: 2 },
-
-  // ── Section ──
-  section: { marginTop: spacing.xl, paddingHorizontal: spacing.lg },
-  sectionHeader: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: spacing.lg,
-  },
-  sectionTitle: { fontSize: fontSizes.xl, fontWeight: fontWeights.bold, color: colors.primary },
-  addBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: colors.primary, paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm, borderRadius: borderRadius.md,
-  },
-  addBtnText: { fontSize: fontSizes.sm, fontWeight: fontWeights.semibold, color: colors.white },
-
-  // ── Empty state ──
-  emptyState: {
-    alignItems: 'center', backgroundColor: colors.white,
-    borderRadius: borderRadius.xl, padding: spacing.xxxl,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1, shadowRadius: 6, elevation: 2,
-  },
-  emptyTitle: { fontSize: fontSizes.lg, fontWeight: fontWeights.bold, color: colors.darkGrey, marginTop: spacing.lg },
-  emptySubtitle: { fontSize: fontSizes.md, color: colors.mediumGrey, marginTop: spacing.xs, textAlign: 'center' },
-
-  primaryBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: colors.primary, paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md, borderRadius: borderRadius.md,
-  },
-  primaryBtnText: { fontSize: fontSizes.md, fontWeight: fontWeights.bold, color: colors.white },
-
-  // ── Location card ──
-  locationCard: {
-    backgroundColor: colors.white, borderRadius: borderRadius.lg,
-    marginBottom: spacing.lg, overflow: 'hidden',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08, shadowRadius: 6, elevation: 2,
-  },
-  cardImage: {
-    height: 140, backgroundColor: colors.grey,
+  bigIconBox: {
+    width: 160, height: 160,
     justifyContent: 'center', alignItems: 'center',
   },
-  cardImageFull: { width: '100%', height: '100%' },
-  cardContent: { padding: spacing.lg },
-  cardCategoryRow: { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.sm },
-  categoryTag: {
-    backgroundColor: colors.grey, paddingHorizontal: spacing.md,
-    paddingVertical: 3, borderRadius: borderRadius.round,
-  },
-  categoryTagText: { fontSize: fontSizes.xs, fontWeight: fontWeights.semibold, color: colors.primary },
-  verifiedTag: {
-    backgroundColor: colors.verifiedBg, paddingHorizontal: spacing.md,
-    paddingVertical: 3, borderRadius: borderRadius.round,
-  },
-  unverifiedTag: { backgroundColor: colors.unverifiedBg },
-  verifiedTagText: { fontSize: fontSizes.xs, fontWeight: fontWeights.semibold, color: colors.verifiedText },
-  unverifiedTagText: { color: colors.unverifiedText },
-  cardName: { fontSize: fontSizes.lg, fontWeight: fontWeights.bold, color: colors.black, marginBottom: 4 },
-  cardAddress: { fontSize: fontSizes.sm, color: colors.darkGrey, marginBottom: spacing.sm },
-  featureRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginBottom: spacing.md },
-  featureChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    backgroundColor: colors.grey, paddingHorizontal: spacing.sm,
-    paddingVertical: 3, borderRadius: borderRadius.round,
-  },
-  featureChipText: { fontSize: fontSizes.xs, color: colors.darkGrey },
-  cardActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
-  cardActionBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
-    paddingVertical: spacing.sm, borderRadius: borderRadius.md,
-    backgroundColor: colors.grey,
-  },
-  cardActionDanger: { backgroundColor: colors.dangerBg },
-  cardActionText: { fontSize: fontSizes.sm, fontWeight: fontWeights.semibold, color: colors.primary },
 
-  // ── Logout ──
-  logoutBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,
-    marginHorizontal: spacing.lg, marginTop: spacing.xxl, paddingVertical: spacing.md,
-    borderRadius: borderRadius.md, backgroundColor: colors.dangerBg,
+  headerCard: {
+    alignItems: 'center',
+    padding: 24,
+    marginBottom: 20,
   },
-  logoutText: { fontSize: fontSizes.md, fontWeight: fontWeights.semibold, color: colors.danger },
+  avatarCircle: {
+    width: 80, height: 80, borderRadius: 40,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  orgBadge: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 999, marginTop: 8,
+  },
+
+  statsRow: { flexDirection: 'row', gap: 10 },
+  statCard: {
+    flex: 1,
+    padding: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'flex-start',
+  },
+  statIconBox: {
+    width: 32, height: 32, borderRadius: 10,
+    justifyContent: 'center', alignItems: 'center',
+  },
+
+  emptyState: {
+    padding: 32, alignItems: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+
+  locationRow: {
+    flexDirection: 'row', alignItems: 'center',
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginBottom: 10,
+  },
+  locationMetaRow: {
+    flexDirection: 'row', alignItems: 'center', marginTop: 4,
+  },
+  locationAction: {
+    width: 40, height: 40, borderRadius: 20,
+    justifyContent: 'center', alignItems: 'center',
+  },
 });

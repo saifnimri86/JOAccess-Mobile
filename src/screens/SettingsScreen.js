@@ -1,326 +1,590 @@
-import React, { useState, useEffect } from 'react';
+/**
+ * SettingsScreen (Phase 1.5)
+ * ==========================
+ * Changes from Phase 1:
+ *   - Removed the live preview card (redundant — the whole app is the
+ *     preview now that we're on Phase 1.5's full design system)
+ *   - Added more deep-link buttons: TalkBack settings, Reduce motion,
+ *     System accessibility overview
+ *   - Screen-reader status card shows more context about what's detected
+ *   - The language card now explains that switching RTL requires app restart
+ *     (RN's I18nManager limitation) with a helper to do a soft reload
+ */
+
+import React from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Switch, Alert, TextInput, Linking,
+  View, Text, StyleSheet, ScrollView, Switch, Linking, Platform, Alert,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Animated, { useAnimatedStyle, withTiming } from 'react-native-reanimated';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+
 import { useLanguage } from '../context/LanguageContext';
-import { useAuth } from '../context/AuthContext';
-import * as api from '../services/api';
-import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../utils/theme';
+import { useAccessibility } from '../context/AccessibilityContext';
+import AnimatedPressable from '../components/AnimatedPressable';
+import SectionHeader from '../components/SectionHeader';
+import StaggeredReveal from '../components/StaggeredReveal';
+import ThemeCard from '../components/ThemeCard';
+import TalkBackGuide from '../components/TalkBackGuide';
 
 export default function SettingsScreen() {
-  const { t, lang, isRTL, toggleLanguage } = useLanguage();
-  const { isAuthenticated, user } = useAuth();
+  const { t, lang, isRTL, setLanguage } = useLanguage();
+  const a11y = useAccessibility();
+  const {
+    theme, scale, announce, screenReaderEnabled, prefersReducedMotion,
+    highContrast, dyslexiaFont, reducedMotion, colorBlindMode, textSizePercent,
+    glassUI, updateSettings,
+  } = a11y;
 
-  // ── Accessibility settings (synced with server when logged in) ──
-  const [highContrast, setHighContrast] = useState(false);
-  const [dyslexiaFont, setDyslexiaFont] = useState(false);
-  const [reducedMotion, setReducedMotion] = useState(false);
-  const [colorBlindMode, setColorBlindMode] = useState('none');
-  const [textSizePercent, setTextSizePercent] = useState(100);
+  const toggleHighContrast = () => {
+    const next = !highContrast;
+    updateSettings({ highContrast: next });
+    announce(`${t('highContrast')} ${next ? t('enabled') : t('disabled')}`);
+  };
 
-  // Load accessibility settings from server
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadSettings();
+  const toggleDyslexiaFont = () => {
+    const next = !dyslexiaFont;
+    updateSettings({ dyslexiaFont: next });
+    announce(`${t('dyslexiaFont')} ${next ? t('enabled') : t('disabled')}`);
+  };
+
+  const toggleReducedMotion = () => {
+    const next = !reducedMotion;
+    updateSettings({ reducedMotion: next });
+    announce(`${t('reducedMotion')} ${next ? t('enabled') : t('disabled')}`);
+  };
+
+  const toggleGlassUI = () => {
+    const next = !glassUI;
+    updateSettings({ glassUI: next });
+    announce(`${t('glassUI')} ${next ? t('enabled') : t('disabled')}`);
+  };
+
+  const setTextSize = (size) => {
+    updateSettings({ textSizePercent: size });
+    announce(`${t('textSize')} ${size}%`);
+  };
+
+  const setCbMode = (mode) => {
+    updateSettings({ colorBlindMode: mode });
+    announce(`${t('colorBlindMode')}: ${t(mode)}`);
+  };
+
+  const switchLang = (target) => {
+    if (lang === target) return;
+    // LanguageContext now auto-reloads the app on RTL change via
+    // react-native-restart (or DevSettings.reload as fallback). No more
+    // manual alert needed. If the reload fails for some reason, the
+    // LanguageContext itself shows an alert as a last resort.
+    setLanguage(target);
+  };
+
+  // ─── Deep-link helpers ────────────────────────────────────────────
+  // These open system-level settings pages the user can't easily find.
+  const openAccessibilitySettings = () => {
+    if (Platform.OS === 'android') {
+      // The generic accessibility settings page — lists every installed
+      // service including TalkBack, Select to Speak, etc.
+      Linking.sendIntent?.('android.settings.ACCESSIBILITY_SETTINGS').catch(() => {
+        Linking.openSettings().catch(() => { });
+      });
+    } else {
+      Linking.openURL('app-settings:').catch(() => Linking.openSettings().catch(() => { }));
     }
-  }, [isAuthenticated]);
+  };
 
-  async function loadSettings() {
-    try {
-      const settings = await api.getAccessibilitySettings();
-      if (settings) {
-        setHighContrast(settings.highContrast || false);
-        setDyslexiaFont(settings.dyslexiaFont || false);
-        setReducedMotion(settings.reducedMotion || false);
-        setColorBlindMode(settings.colorBlindMode || 'none');
-        setTextSizePercent(settings.textSize || 100);
-      }
-    } catch {
-      // Use defaults
-    }
-  }
-
-  async function saveSettings(updates) {
-    const settings = {
-      highContrast,
-      dyslexiaFont,
-      reducedMotion,
-      colorBlindMode,
-      textSize: textSizePercent,
-      ...updates,
-    };
-
-    if (isAuthenticated) {
-      try {
-        await api.updateAccessibilitySettings(settings);
-      } catch {
-        // Silently fail — settings still apply locally
-      }
-    }
-  }
-
-  function handleToggleHighContrast(val) {
-    setHighContrast(val);
-    saveSettings({ highContrast: val });
-  }
-
-  function handleToggleDyslexia(val) {
-    setDyslexiaFont(val);
-    saveSettings({ dyslexiaFont: val });
-  }
-
-  function handleToggleMotion(val) {
-    setReducedMotion(val);
-    saveSettings({ reducedMotion: val });
-  }
-
-  function handleColorBlind(mode) {
-    setColorBlindMode(mode);
-    saveSettings({ colorBlindMode: mode });
-  }
-
-  function handleTextSize(size) {
-    setTextSizePercent(size);
-    saveSettings({ textSize: size });
-  }
+  const openAppInfoPage = () => {
+    // Opens this app's specific info page in system settings — useful for
+    // granting permissions, clearing cache, etc.
+    Linking.openSettings().catch(() => { });
+  };
 
   const textAlign = isRTL ? 'right' : 'left';
 
+  const animatedBg = useAnimatedStyle(() => ({
+    backgroundColor: withTiming(theme.color.bg, { duration: prefersReducedMotion ? 0 : 200 })
+  }), [theme.color.bg, prefersReducedMotion]);
+
   return (
-    <ScrollView style={styles.container}>
-      {/* ── Language Section ── */}
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { textAlign }]}>
-          <Ionicons name="language" size={18} color={colors.primary} /> {t('language')}
-        </Text>
-
-        <View style={styles.card}>
-          <View style={styles.langRow}>
-            <TouchableOpacity
-              style={[styles.langBtn, lang === 'en' && styles.langBtnActive]}
-              onPress={() => { if (lang !== 'en') toggleLanguage(); }}
+    <Animated.View style={[styles.root, animatedBg]}>
+      <SafeAreaView
+        style={styles.root}
+        edges={['top', 'left', 'right']}
+      >
+        <ScrollView
+          contentContainerStyle={[
+            styles.content,
+            // Bottom padding accounts for the tab bar overlap
+            { paddingBottom: 96 },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Hero title */}
+          <View style={styles.hero}>
+            <Text
+              style={{
+                fontSize: scale(theme.fontSizes.xxxl),
+                fontWeight: theme.fontWeights.heavy,
+                color: theme.color.text,
+                fontFamily: theme.fontFamily,
+                textAlign: 'center',
+              }}
+              accessibilityRole="header"
             >
-              <Text style={[styles.langBtnText, lang === 'en' && styles.langBtnTextActive]}>
-                English
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.langBtn, lang === 'ar' && styles.langBtnActive]}
-              onPress={() => { if (lang !== 'ar') toggleLanguage(); }}
+              {t('settings')}
+            </Text>
+            <Text
+              style={{
+                fontSize: scale(theme.fontSizes.md),
+                color: theme.color.textMuted,
+                marginTop: 4,
+                fontFamily: theme.fontFamily,
+                textAlign: 'center',
+              }}
             >
-              <Text style={[styles.langBtnText, lang === 'ar' && styles.langBtnTextActive]}>
-                العربية
-              </Text>
-            </TouchableOpacity>
+              {lang === 'ar' ? 'تغييرات فورية عبر التطبيق' : 'Changes apply instantly across the app'}
+            </Text>
           </View>
-        </View>
-      </View>
 
-      {/* ── Accessibility Settings Section ── */}
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { textAlign }]}>
-          <Ionicons name="accessibility" size={18} color={colors.primary} /> {t('accessibilitySettingsTitle')}
-        </Text>
+          {/* Language */}
+          <StaggeredReveal index={0}>
+            <SectionHeader title={t('language')} icon="language" align={textAlign} />
+            <ThemeCard key={`lang-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              <View style={styles.langRow}>
+                <LanguagePill label="English" active={lang === 'en'} onPress={() => switchLang('en')} />
+                <LanguagePill label="العربية" active={lang === 'ar'} onPress={() => switchLang('ar')} />
+              </View>
+            </ThemeCard>
+          </StaggeredReveal>
 
-        <View style={styles.card}>
-          {/* High Contrast */}
-          <View style={styles.settingRow}>
-            <View style={styles.settingInfo}>
-              <Ionicons name="contrast" size={20} color={colors.darkGrey} />
-              <Text style={styles.settingLabel}>{t('highContrast')}</Text>
-            </View>
-            <Switch
-              value={highContrast}
-              onValueChange={handleToggleHighContrast}
-              trackColor={{ false: colors.lightGrey, true: colors.primaryLight }}
-              thumbColor={highContrast ? colors.primary : colors.mediumGrey}
+          {/* Display */}
+          <StaggeredReveal index={1}>
+            <SectionHeader title={lang === 'ar' ? 'العرض' : 'Display'} icon="color-palette" align={textAlign} />
+            <ThemeCard key={`disp-${theme.mode}-${colorBlindMode}-${highContrast}-${dyslexiaFont}-${reducedMotion}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              <SettingToggleRow
+                icon="contrast"
+                label={t('highContrast')}
+                description={lang === 'ar' ? 'نمط داكن عالي التباين' : 'Dark, high-contrast theme'}
+                value={highContrast}
+                onToggle={toggleHighContrast}
+              />
+              <Divider />
+              <SettingToggleRow
+                icon="text"
+                label={t('dyslexiaFont')}
+                description={lang === 'ar' ? 'خط أسهل للقراءة' : 'Easier-to-read font'}
+                value={dyslexiaFont}
+                onToggle={toggleDyslexiaFont}
+              />
+              <Divider />
+              <SettingToggleRow
+                icon="pause-circle"
+                label={t('reducedMotion')}
+                description={lang === 'ar' ? 'تقليل الحركة والرسوم المتحركة' : 'Minimize animations'}
+                value={reducedMotion}
+                onToggle={toggleReducedMotion}
+              />
+              <Divider />
+              <SettingToggleRow
+                icon="color-filter"
+                label={t('glassUI')}
+                description={t('glassUIDesc')}
+                value={glassUI}
+                onToggle={toggleGlassUI}
+              />
+            </ThemeCard>
+          </StaggeredReveal>
+
+          {/* Text size */}
+          <StaggeredReveal index={2}>
+            <SectionHeader
+              title={t('textSize')}
+              icon="resize"
+              subtitle={`${textSizePercent}%`}
+              align={textAlign}
             />
-          </View>
-
-          {/* Dyslexia Font */}
-          <View style={styles.settingRow}>
-            <View style={styles.settingInfo}>
-              <Ionicons name="text" size={20} color={colors.darkGrey} />
-              <Text style={styles.settingLabel}>{t('dyslexiaFont')}</Text>
-            </View>
-            <Switch
-              value={dyslexiaFont}
-              onValueChange={handleToggleDyslexia}
-              trackColor={{ false: colors.lightGrey, true: colors.primaryLight }}
-              thumbColor={dyslexiaFont ? colors.primary : colors.mediumGrey}
-            />
-          </View>
-
-          {/* Reduced Motion */}
-          <View style={styles.settingRow}>
-            <View style={styles.settingInfo}>
-              <Ionicons name="pause-circle" size={20} color={colors.darkGrey} />
-              <Text style={styles.settingLabel}>{t('reducedMotion')}</Text>
-            </View>
-            <Switch
-              value={reducedMotion}
-              onValueChange={handleToggleMotion}
-              trackColor={{ false: colors.lightGrey, true: colors.primaryLight }}
-              thumbColor={reducedMotion ? colors.primary : colors.mediumGrey}
-            />
-          </View>
-
-          {/* Text Size */}
-          <View style={styles.settingRowVertical}>
-            <View style={styles.settingInfo}>
-              <Ionicons name="resize" size={20} color={colors.darkGrey} />
-              <Text style={styles.settingLabel}>{t('textSize')}: {textSizePercent}%</Text>
-            </View>
-            <View style={styles.textSizeRow}>
-              {[80, 100, 120, 150].map((size) => (
-                <TouchableOpacity
-                  key={size}
-                  style={[styles.sizeBtn, textSizePercent === size && styles.sizeBtnActive]}
-                  onPress={() => handleTextSize(size)}
-                >
-                  <Text style={[styles.sizeBtnText, textSizePercent === size && styles.sizeBtnTextActive]}>
-                    {size}%
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-
-          {/* Color Blind Mode */}
-          <View style={styles.settingRowVertical}>
-            <View style={styles.settingInfo}>
-              <Ionicons name="eye" size={20} color={colors.darkGrey} />
-              <Text style={styles.settingLabel}>{t('colorBlindMode')}</Text>
-            </View>
-            <View style={styles.colorBlindRow}>
-              {[
-                { key: 'none', label: t('none') },
-                { key: 'protanopia', label: t('protanopia') },
-                { key: 'deuteranopia', label: t('deuteranopia') },
-                { key: 'tritanopia', label: t('tritanopia') },
-              ].map((opt) => (
-                <TouchableOpacity
-                  key={opt.key}
-                  style={[styles.cbBtn, colorBlindMode === opt.key && styles.cbBtnActive]}
-                  onPress={() => handleColorBlind(opt.key)}
-                >
-                  <Ionicons
-                    name={colorBlindMode === opt.key ? 'radio-button-on' : 'radio-button-off'}
-                    size={18}
-                    color={colorBlindMode === opt.key ? colors.primary : colors.darkGrey}
+            <ThemeCard key={`text-${theme.mode}-${colorBlindMode}-${textSizePercent}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              <View style={styles.sizeRow}>
+                {[80, 100, 120, 150].map((size) => (
+                  <SizeSegment
+                    key={size}
+                    size={size}
+                    selected={textSizePercent === size}
+                    onPress={() => setTextSize(size)}
                   />
-                  <Text style={[styles.cbBtnText, colorBlindMode === opt.key && { color: colors.primary }]}>
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
+                ))}
+              </View>
+            </ThemeCard>
+          </StaggeredReveal>
+
+          {/* Color vision */}
+          <StaggeredReveal index={3}>
+            <SectionHeader title={t('colorBlindMode')} icon="eye" align={textAlign} />
+            <ThemeCard key={`cb-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              {[
+                { key: 'none', swatch: null },
+                { key: 'protanopia', swatch: '#C85250' },
+                { key: 'deuteranopia', swatch: '#2A9D5F' },
+                { key: 'tritanopia', swatch: '#3E8BC9' },
+                { key: 'achromatopsia', swatch: '#808080' },
+              ].map((opt, i, arr) => (
+                <React.Fragment key={opt.key}>
+                  <ColorVisionRow
+                    label={t(opt.key)}
+                    swatch={opt.swatch}
+                    selected={colorBlindMode === opt.key}
+                    onPress={() => setCbMode(opt.key)}
+                  />
+                  {i < arr.length - 1 ? <Divider /> : null}
+                </React.Fragment>
               ))}
-            </View>
-          </View>
-        </View>
-      </View>
+            </ThemeCard>
+          </StaggeredReveal>
 
-      {/* ── About Section ── */}
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { textAlign }]}>
-          <Ionicons name="information-circle" size={18} color={colors.primary} /> {t('about')}
-        </Text>
+          {/* Screen reader status + deep links */}
+          <StaggeredReveal index={4}>
+            <SectionHeader
+              title={lang === 'ar' ? 'قارئ الشاشة والإمكانيات' : 'Screen Reader & System Accessibility'}
+              icon="mic"
+              align={textAlign}
+            />
 
-        <View style={styles.card}>
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>{t('appName')}</Text>
-            <Text style={styles.aboutValue}>JOAccess</Text>
-          </View>
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>{t('version')}</Text>
-            <Text style={styles.aboutValue}>1.0.0</Text>
-          </View>
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>{t('tagline')}</Text>
-            <Text style={styles.aboutValue}>{t('tagline')}</Text>
-          </View>
+            {/* Inline help card — only renders when reader is off and the user
+                hasn't dismissed it before. Silently a no-op otherwise. */}
+            <TalkBackGuide />
 
-          <Text style={styles.copyright}>
-            © 2025-2026 JOAccess - JUST
-          </Text>
-        </View>
-      </View>
+            <ThemeCard key={`sr-${theme.mode}-${colorBlindMode}-${screenReaderEnabled}-${prefersReducedMotion}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              {/* Current state */}
+              <View style={[styles.settingRow, { paddingBottom: theme.spacing.md }]}>
+                <View style={[styles.settingIconBox, { backgroundColor: theme.color.brandMuted }]}>
+                  <Ionicons name="mic" size={20} color={theme.color.textBrand} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[
+                    styles.settingLabel,
+                    { color: theme.color.text, fontSize: scale(theme.fontSizes.md), fontFamily: theme.fontFamily },
+                  ]}>
+                    {screenReaderEnabled
+                      ? (lang === 'ar' ? 'قارئ الشاشة مُفعّل' : 'Screen reader active')
+                      : (lang === 'ar' ? 'قارئ الشاشة غير مفعّل' : 'Screen reader off')}
+                  </Text>
+                  <Text style={[
+                    styles.settingDesc,
+                    { color: theme.color.textMuted, fontSize: scale(theme.fontSizes.sm), fontFamily: theme.fontFamily },
+                  ]}>
+                    {Platform.OS === 'ios' ? 'VoiceOver' : 'TalkBack'}
+                    {prefersReducedMotion ? (lang === 'ar' ? ' · تقليل الحركة ON' : ' · Reduce motion ON') : ''}
+                  </Text>
+                </View>
+                <View
+                  style={[styles.statusDot, { backgroundColor: screenReaderEnabled ? theme.color.success : theme.color.borderStrong }]}
+                  accessible={false}
+                />
+              </View>
 
-      <View style={{ height: 40 }} />
-    </ScrollView>
+              <Text style={{
+                fontSize: scale(theme.fontSizes.sm),
+                color: theme.color.textMuted,
+                fontFamily: theme.fontFamily,
+                marginVertical: theme.spacing.md,
+                textAlign,
+                lineHeight: 20,
+              }}>
+                {lang === 'ar'
+                  ? 'يستخدم التطبيق قارئ الشاشة المدمج في هاتفك. افتح إعدادات النظام لضبطه.'
+                  : 'JOAccess uses your phone\'s built-in screen reader. Open system settings to configure it.'}
+              </Text>
+
+              <DeepLinkButton
+                icon="accessibility"
+                label={lang === 'ar' ? 'إعدادات إمكانية الوصول' : 'Accessibility settings'}
+                hint={lang === 'ar' ? 'TalkBack، قارئات الشاشة، وأكثر' : 'TalkBack, screen readers, and more'}
+                onPress={openAccessibilitySettings}
+              />
+              <View style={{ height: 8 }} />
+              <DeepLinkButton
+                icon="information-circle"
+                label={lang === 'ar' ? 'معلومات التطبيق' : 'App info'}
+                hint={lang === 'ar' ? 'الأذونات، التخزين، والإشعارات' : 'Permissions, storage, and notifications'}
+                onPress={openAppInfoPage}
+              />
+            </ThemeCard>
+          </StaggeredReveal>
+
+          {/* About */}
+          <StaggeredReveal index={5}>
+            <SectionHeader title={t('about')} icon="information-circle" align={textAlign} />
+            <ThemeCard key={`about-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
+              <AboutRow label={t('appName')} value="JOAccess" />
+              <Divider />
+              <AboutRow label={t('version')} value="1.0.0" />
+              <Divider />
+              <AboutRow label="© 2025–2026" value="JUST" />
+            </ThemeCard>
+          </StaggeredReveal>
+        </ScrollView>
+      </SafeAreaView>
+    </Animated.View>
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// Sub-components
+// ══════════════════════════════════════════════════════════════════════
+
+function LanguagePill({ label, active, onPress }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <AnimatedPressable
+      onPress={onPress}
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      accessibilityState={{ selected: active }}
+      style={[
+        styles.langPill,
+        {
+          backgroundColor: active ? theme.color.brand : theme.color.surface,
+          borderColor: active ? theme.color.brand : theme.color.border,
+          borderRadius: theme.radii.md,
+        },
+      ]}
+    >
+      <Text style={{
+        color: active ? theme.color.textOnBrand : theme.color.text,
+        fontSize: scale(theme.fontSizes.md),
+        fontWeight: active ? theme.fontWeights.bold : theme.fontWeights.semibold,
+        fontFamily: theme.fontFamily,
+      }}>
+        {label}
+      </Text>
+    </AnimatedPressable>
+  );
+}
+
+function SettingToggleRow({ icon, label, description, value, onToggle }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <View style={styles.settingRow}>
+      <View style={[styles.settingIconBox, { backgroundColor: theme.color.brandMuted }]}>
+        <Ionicons name={icon} size={18} color={theme.color.textBrand} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={[
+          styles.settingLabel,
+          { color: theme.color.text, fontSize: scale(theme.fontSizes.md), fontFamily: theme.fontFamily },
+        ]}>
+          {label}
+        </Text>
+        {description ? (
+          <Text style={[
+            styles.settingDesc,
+            { color: theme.color.textMuted, fontSize: scale(theme.fontSizes.sm), fontFamily: theme.fontFamily },
+          ]}>
+            {description}
+          </Text>
+        ) : null}
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onToggle}
+        trackColor={{ false: theme.color.border, true: theme.color.brand }}
+        thumbColor={Platform.OS === 'android' ? (value ? theme.color.brand : theme.color.surface) : undefined}
+        ios_backgroundColor={theme.color.border}
+        accessibilityLabel={label}
+        accessibilityHint={description}
+      />
+    </View>
+  );
+}
+
+function SizeSegment({ size, selected, onPress }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <AnimatedPressable
+      onPress={onPress}
+      accessibilityLabel={`Text size ${size} percent`}
+      accessibilityRole="radio"
+      accessibilityState={{ selected }}
+      style={[
+        styles.sizeSegment,
+        {
+          backgroundColor: selected ? theme.color.brand : theme.color.surface,
+          borderColor: selected ? theme.color.brand : theme.color.border,
+          borderRadius: theme.radii.md,
+        },
+      ]}
+    >
+      <Text style={{
+        fontSize: 14,
+        fontWeight: selected ? theme.fontWeights.bold : theme.fontWeights.semibold,
+        color: selected ? theme.color.textOnBrand : theme.color.textMuted,
+        fontFamily: theme.fontFamily,
+      }}>
+        {size}%
+      </Text>
+    </AnimatedPressable>
+  );
+}
+
+function ColorVisionRow({ label, swatch, selected, onPress }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <AnimatedPressable
+      onPress={onPress}
+      accessibilityLabel={label}
+      accessibilityRole="radio"
+      accessibilityState={{ selected }}
+      style={styles.settingRow}
+    >
+      <View style={styles.radio}>
+        <Ionicons
+          name={selected ? 'radio-button-on' : 'radio-button-off'}
+          size={22}
+          color={selected ? theme.color.brand : theme.color.textMuted}
+        />
+      </View>
+      <Text style={[
+        styles.settingLabel,
+        {
+          flex: 1,
+          color: theme.color.text,
+          fontSize: scale(theme.fontSizes.md),
+          fontFamily: theme.fontFamily,
+          fontWeight: selected ? theme.fontWeights.semibold : theme.fontWeights.regular,
+        },
+      ]}>
+        {label}
+      </Text>
+      {swatch ? (
+        <View style={[styles.swatch, { backgroundColor: swatch, borderColor: theme.color.border }]} />
+      ) : null}
+    </AnimatedPressable>
+  );
+}
+
+function DeepLinkButton({ icon, label, hint, onPress }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <AnimatedPressable
+      onPress={onPress}
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+      accessibilityRole="link"
+      style={[
+        styles.deepLinkRow,
+        {
+          backgroundColor: theme.color.brandMuted,
+          borderRadius: theme.radii.md,
+        },
+      ]}
+    >
+      <Ionicons name={icon} size={18} color={theme.color.textBrand} />
+      <View style={{ flex: 1, marginLeft: 10 }}>
+        <Text style={{
+          color: theme.color.textBrand,
+          fontSize: scale(theme.fontSizes.md),
+          fontWeight: theme.fontWeights.semibold,
+          fontFamily: theme.fontFamily,
+        }}>
+          {label}
+        </Text>
+        <Text style={{
+          color: theme.color.textBrand,
+          fontSize: scale(theme.fontSizes.xs),
+          opacity: 0.7,
+          marginTop: 2,
+          fontFamily: theme.fontFamily,
+        }}>
+          {hint}
+        </Text>
+      </View>
+      <Ionicons name="open-outline" size={16} color={theme.color.textBrand} />
+    </AnimatedPressable>
+  );
+}
+
+function AboutRow({ label, value }) {
+  const { theme, scale } = useAccessibility();
+  return (
+    <View style={styles.aboutRow} accessible accessibilityLabel={`${label}: ${value}`}>
+      <Text style={{
+        color: theme.color.textMuted,
+        fontSize: scale(theme.fontSizes.md),
+        fontFamily: theme.fontFamily,
+      }}>
+        {label}
+      </Text>
+      <Text style={{
+        color: theme.color.text,
+        fontSize: scale(theme.fontSizes.md),
+        fontWeight: theme.fontWeights.semibold,
+        fontFamily: theme.fontFamily,
+      }}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function Divider() {
+  const { theme } = useAccessibility();
+  return <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: theme.color.divider, marginVertical: 2 }} />;
+}
+
+const cardStyle = (theme) => ({
+  borderRadius: theme.radii.lg,
+  backgroundColor: theme.color.surface,
+  borderColor: theme.color.border,
+  borderWidth: StyleSheet.hairlineWidth,
+  padding: theme.spacing.md,
+  marginBottom: theme.spacing.xl,
+  ...theme.elevation.sm,
+});
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.grey },
+  root: { flex: 1 },
+  content: { paddingHorizontal: 20, paddingTop: 24 },
 
-  section: { marginTop: spacing.xl, paddingHorizontal: spacing.lg },
-  sectionTitle: {
-    fontSize: fontSizes.lg, fontWeight: fontWeights.bold,
-    color: colors.primary, marginBottom: spacing.md,
+  hero: { marginBottom: 24 },
+
+  langRow: { flexDirection: 'row', gap: 10 },
+  langPill: {
+    flex: 1, paddingVertical: 14, borderWidth: 1.5,
+    alignItems: 'center', justifyContent: 'center',
+    minHeight: 48,
   },
 
-  card: {
-    backgroundColor: colors.white, borderRadius: borderRadius.xl,
-    padding: spacing.lg,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08, shadowRadius: 6, elevation: 2,
-  },
-
-  // ── Language ──
-  langRow: { flexDirection: 'row', gap: spacing.md },
-  langBtn: {
-    flex: 1, paddingVertical: spacing.md, borderRadius: borderRadius.md,
-    backgroundColor: colors.grey, alignItems: 'center',
-    borderWidth: 2, borderColor: colors.lightGrey,
-  },
-  langBtnActive: {
-    backgroundColor: colors.primary, borderColor: colors.primary,
-  },
-  langBtnText: { fontSize: fontSizes.md, fontWeight: fontWeights.semibold, color: colors.darkGrey },
-  langBtnTextActive: { color: colors.white },
-
-  // ── Settings rows ──
   settingRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.grey,
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 10, gap: 12,
   },
-  settingRowVertical: {
-    paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.grey,
+  settingIconBox: {
+    width: 36, height: 36, borderRadius: 10,
+    justifyContent: 'center', alignItems: 'center',
   },
-  settingInfo: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, flex: 1 },
-  settingLabel: { fontSize: fontSizes.md, color: colors.black },
+  settingLabel: { lineHeight: 22 },
+  settingDesc: { marginTop: 2 },
 
-  // ── Text size ──
-  textSizeRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
-  sizeBtn: {
-    flex: 1, paddingVertical: spacing.sm, borderRadius: borderRadius.md,
-    backgroundColor: colors.grey, alignItems: 'center',
-    borderWidth: 1, borderColor: colors.lightGrey,
-  },
-  sizeBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  sizeBtnText: { fontSize: fontSizes.sm, fontWeight: fontWeights.semibold, color: colors.darkGrey },
-  sizeBtnTextActive: { color: colors.white },
+  radio: { width: 24, alignItems: 'center' },
+  swatch: { width: 22, height: 22, borderRadius: 11, borderWidth: 1 },
 
-  // ── Color blind ──
-  colorBlindRow: { marginTop: spacing.md, gap: spacing.sm },
-  cbBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    paddingVertical: spacing.xs,
+  sizeRow: { flexDirection: 'row', gap: 8 },
+  sizeSegment: {
+    flex: 1, paddingVertical: 10,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, minHeight: 44,
   },
-  cbBtnActive: {},
-  cbBtnText: { fontSize: fontSizes.md, color: colors.darkGrey },
 
-  // ── About ──
   aboutRow: {
     flexDirection: 'row', justifyContent: 'space-between',
-    paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.grey,
+    alignItems: 'center', paddingVertical: 10,
   },
-  aboutLabel: { fontSize: fontSizes.md, color: colors.darkGrey },
-  aboutValue: { fontSize: fontSizes.md, fontWeight: fontWeights.semibold, color: colors.black },
-  copyright: {
-    fontSize: fontSizes.sm, color: colors.mediumGrey,
-    textAlign: 'center', marginTop: spacing.lg,
+
+  deepLinkRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 12,
+    minHeight: 52,
   },
+
+  statusDot: { width: 10, height: 10, borderRadius: 5 },
 });

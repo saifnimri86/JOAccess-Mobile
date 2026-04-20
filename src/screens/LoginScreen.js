@@ -1,40 +1,67 @@
+/**
+ * LoginScreen (Phase 1.5)
+ * =======================
+ * Fully redesigned with the new design system:
+ *   - Gradient header icon (circular, maroon-to-dark-maroon)
+ *   - FormField inputs with focus animation
+ *   - PrimaryButton for submit
+ *   - Staggered entrance animations
+ *   - SafeAreaView with top+bottom edges (since this is modal-presented)
+ *   - KeyboardAvoidingView keeps the submit button visible when typing
+ *
+ * Preserves all existing behavior — same auth logic, same translations.
+ */
+
 import React, { useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet,
-  KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert,
+  View, Text, StyleSheet, KeyboardAvoidingView, Platform,
+  ScrollView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
-import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../utils/theme';
+import { useAccessibility } from '../context/AccessibilityContext';
+import { useDialog } from '../context/DialogContext';
+import FormField from '../components/FormField';
+import PrimaryButton from '../components/PrimaryButton';
+import AnimatedPressable from '../components/AnimatedPressable';
+import StaggeredReveal from '../components/StaggeredReveal';
 
 export default function LoginScreen({ navigation }) {
-  const { login, error, clearError } = useAuth();
+  const { login, clearError } = useAuth();
   const { t, isRTL } = useLanguage();
+  const { theme, scale, announce } = useAccessibility();
+  const { showDialog } = useDialog();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [fieldError, setFieldError] = useState({});
 
   async function handleLogin() {
     clearError();
+    setFieldError({});
 
-    if (!email.trim()) {
-      Alert.alert(t('error'), t('emailRequired'));
-      return;
-    }
-    if (!password) {
-      Alert.alert(t('error'), t('passwordRequired'));
+    const errs = {};
+    if (!email.trim()) errs.email = t('emailRequired');
+    if (!password)     errs.password = t('passwordRequired');
+
+    if (Object.keys(errs).length > 0) {
+      setFieldError(errs);
+      announce(Object.values(errs)[0]);
       return;
     }
 
     setIsSubmitting(true);
     try {
       await login(email.trim().toLowerCase(), password);
-      // Navigation happens automatically via the auth state change
+      navigation.goBack();
     } catch (msg) {
-      Alert.alert(t('error'), typeof msg === 'string' ? msg : t('invalidCredentials'));
+      const msgText = typeof msg === 'string' ? msg : (msg?.message || t('invalidCredentials'));
+      showDialog(t('error'), msgText);
+      announce(msgText);
     } finally {
       setIsSubmitting(false);
     }
@@ -43,176 +70,165 @@ export default function LoginScreen({ navigation }) {
   const textAlign = isRTL ? 'right' : 'left';
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <ScrollView
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
+    <View style={[styles.root, { backgroundColor: theme.color.bg }]}>
+      <SafeAreaView
+        style={styles.root}
+        edges={['top', 'left', 'right']}
       >
-        {/* Header icon */}
-        <View style={styles.iconCircle}>
-          <Ionicons name="lock-closed" size={36} color={colors.white} />
-        </View>
-
-        <Text style={[styles.title, { textAlign }]}>{t('login')}</Text>
-        <Text style={[styles.subtitle, { textAlign }]}>{t('loginSubtitle')}</Text>
-
-        {/* Email */}
-        <View style={styles.inputContainer}>
-          <Ionicons name="mail-outline" size={20} color={colors.darkGrey} style={styles.inputIcon} />
-          <TextInput
-            style={[styles.input, isRTL && styles.inputRTL]}
-            placeholder={t('email')}
-            placeholderTextColor={colors.mediumGrey}
-            value={email}
-            onChangeText={setEmail}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-            textAlign={textAlign}
-          />
-        </View>
-
-        {/* Password */}
-        <View style={styles.inputContainer}>
-          <Ionicons name="lock-closed-outline" size={20} color={colors.darkGrey} style={styles.inputIcon} />
-          <TextInput
-            style={[styles.input, isRTL && styles.inputRTL, { flex: 1 }]}
-            placeholder={t('password')}
-            placeholderTextColor={colors.mediumGrey}
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry={!showPassword}
-            textAlign={textAlign}
-          />
-          <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
-            <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={colors.darkGrey} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Login Button */}
-        <TouchableOpacity
-          style={[styles.button, isSubmitting && styles.buttonDisabled]}
-          onPress={handleLogin}
-          disabled={isSubmitting}
-          activeOpacity={0.8}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
-          {isSubmitting ? (
-            <ActivityIndicator color={colors.white} />
-          ) : (
-            <Text style={styles.buttonText}>{t('login')}</Text>
-          )}
-        </TouchableOpacity>
+          {/* Close button (since it's a modal) */}
+          <View style={styles.closeRow}>
+            <AnimatedPressable
+              onPress={() => navigation.goBack()}
+              accessibilityLabel={t('cancel')}
+              accessibilityRole="button"
+              hitSlop={12}
+              style={[styles.closeBtn, { backgroundColor: theme.color.surface, borderColor: theme.color.border }]}
+            >
+              <Ionicons name="close" size={22} color={theme.color.text} />
+            </AnimatedPressable>
+          </View>
 
-        {/* Sign Up Link */}
-        <View style={styles.linkRow}>
-          <Text style={styles.linkText}>{t('noAccount')} </Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Signup')}>
-            <Text style={styles.linkAction}>{t('signup')}</Text>
-          </TouchableOpacity>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+          {/* Hero icon + title */}
+          <StaggeredReveal index={0}>
+            <View style={styles.hero}>
+              <View style={[styles.iconCircle, { backgroundColor: theme.color.brand, ...theme.elevation.md }]}>
+                <Ionicons name="lock-closed" size={34} color={theme.color.textOnBrand} />
+              </View>
+              <Text
+                style={{
+                  fontSize:   scale(theme.fontSizes.xxxl),
+                  fontWeight: theme.fontWeights.heavy,
+                  color:      theme.color.text,
+                  fontFamily: theme.fontFamily,
+                  textAlign:  'center',
+                  marginTop:  16,
+                }}
+                accessibilityRole="header"
+              >
+                {t('login')}
+              </Text>
+              <Text
+                style={{
+                  fontSize:   scale(theme.fontSizes.md),
+                  color:      theme.color.textMuted,
+                  marginTop:  6,
+                  fontFamily: theme.fontFamily,
+                  textAlign:  'center',
+                }}
+              >
+                {t('loginSubtitle')}
+              </Text>
+            </View>
+          </StaggeredReveal>
+
+          {/* Form */}
+          <StaggeredReveal index={1}>
+            <FormField
+              icon="mail-outline"
+              label={t('email')}
+              placeholder={t('email')}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoComplete="email"
+              error={fieldError.email}
+              returnKeyType="next"
+            />
+          </StaggeredReveal>
+
+          <StaggeredReveal index={2}>
+            <FormField
+              icon="lock-closed-outline"
+              label={t('password')}
+              placeholder={t('password')}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              autoComplete="password"
+              error={fieldError.password}
+              returnKeyType="go"
+              onSubmitEditing={handleLogin}
+            />
+          </StaggeredReveal>
+
+          {/* Submit */}
+          <StaggeredReveal index={3}>
+            <View style={{ marginTop: 8 }}>
+              <PrimaryButton
+                label={t('login')}
+                icon="log-in-outline"
+                loading={isSubmitting}
+                onPress={handleLogin}
+                accessibilityHint={t('loginSubtitle')}
+              />
+            </View>
+          </StaggeredReveal>
+
+          {/* Sign up link */}
+          <StaggeredReveal index={4}>
+            <View style={styles.footerRow}>
+              <Text style={{
+                color: theme.color.textMuted,
+                fontSize: scale(theme.fontSizes.md),
+                fontFamily: theme.fontFamily,
+              }}>
+                {t('noAccount') || (isRTL ? 'ليس لديك حساب؟' : "Don't have an account?")}
+              </Text>
+              <AnimatedPressable
+                onPress={() => navigation.replace('Signup')}
+                accessibilityLabel={t('signup')}
+                accessibilityRole="link"
+                hitSlop={8}
+                style={{ marginLeft: 6 }}
+              >
+                <Text style={{
+                  color: theme.color.textBrand,
+                  fontSize: scale(theme.fontSizes.md),
+                  fontWeight: theme.fontWeights.bold,
+                  fontFamily: theme.fontFamily,
+                }}>
+                  {t('signup')}
+                </Text>
+              </AnimatedPressable>
+            </View>
+          </StaggeredReveal>
+        </ScrollView>
+      </KeyboardAvoidingView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.grey,
+  root:    { flex: 1 },
+  content: { paddingHorizontal: 24, paddingBottom: 40, flexGrow: 1 },
+
+  closeRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
+  closeBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center', alignItems: 'center',
   },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: spacing.xxl,
-  },
+
+  hero: { alignItems: 'center', marginVertical: 24 },
   iconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: colors.primary,
-    alignSelf: 'center',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: spacing.xl,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    width: 80, height: 80, borderRadius: 40,
+    justifyContent: 'center', alignItems: 'center',
   },
-  title: {
-    fontSize: fontSizes.xxl,
-    fontWeight: fontWeights.bold,
-    color: colors.primary,
-    textAlign: 'center',
-    marginBottom: spacing.xs,
-  },
-  subtitle: {
-    fontSize: fontSizes.md,
-    color: colors.darkGrey,
-    textAlign: 'center',
-    marginBottom: spacing.xxxl,
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.white,
-    borderRadius: borderRadius.md,
-    borderWidth: 2,
-    borderColor: colors.lightGrey,
-    marginBottom: spacing.lg,
-    paddingHorizontal: spacing.md,
-  },
-  inputIcon: {
-    marginRight: spacing.sm,
-  },
-  input: {
-    flex: 1,
-    paddingVertical: spacing.lg,
-    fontSize: fontSizes.md,
-    color: colors.black,
-  },
-  inputRTL: {
-    textAlign: 'right',
-  },
-  eyeBtn: {
-    padding: spacing.sm,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
-    paddingVertical: spacing.lg,
-    alignItems: 'center',
-    marginTop: spacing.md,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  buttonDisabled: {
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: colors.white,
-    fontSize: fontSizes.lg,
-    fontWeight: fontWeights.bold,
-  },
-  linkRow: {
+
+  footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: spacing.xl,
-  },
-  linkText: {
-    fontSize: fontSizes.md,
-    color: colors.darkGrey,
-  },
-  linkAction: {
-    fontSize: fontSizes.md,
-    color: colors.primary,
-    fontWeight: fontWeights.bold,
+    marginTop: 24,
   },
 });

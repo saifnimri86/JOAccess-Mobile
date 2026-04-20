@@ -184,6 +184,38 @@ const translations = {
   },
 
   // ── Settings ──
+  
+  settings: {
+    en: 'Settings',
+    ar: 'الإعدادات',
+  },
+  settingsSubtitle: {
+    en: 'Changes apply instantly across the app',
+    ar: 'تغييرات فورية عبر التطبيق',
+  },
+  display: {
+    en: 'Display',
+    ar: 'العرض',
+  },
+  enabled: {
+    en: 'enabled',
+    ar: 'مُفعّل',
+  },
+  disabled: {
+    en: 'disabled',
+    ar: 'معطّل',
+  },
+  screenReader: {
+    en: 'Screen Reader',
+    ar: 'قارئ الشاشة',
+  },
+
+  // MapScreen additions
+  review: {
+    en: 'review',
+    ar: 'مراجعة',
+  },
+  
   language: { en: 'Language', ar: 'اللغة' },
   english: { en: 'English', ar: 'الإنجليزية' },
   arabic: { en: 'Arabic', ar: 'العربية' },
@@ -200,6 +232,9 @@ const translations = {
   protanopia: { en: 'Protanopia (Red)', ar: 'عمى اللون الأحمر' },
   deuteranopia: { en: 'Deuteranopia (Green)', ar: 'عمى اللون الأخضر' },
   tritanopia: { en: 'Tritanopia (Blue)', ar: 'عمى اللون الأزرق' },
+  achromatopsia: { en: 'Achromatopsia (Full)', ar: 'عمى الألوان الكلي (رمادي)' },
+  glassUI: { en: 'Glass UI (Experimental)', ar: 'واجهة زجاجية (تجريبي)' },
+  glassUIDesc: { en: 'Translucent blurred elements', ar: 'عناصر شفافة ضبابية' },
   serverUrl: { en: 'Server URL', ar: 'عنوان الخادم' },
   about: { en: 'About', ar: 'حول' },
   version: { en: 'Version', ar: 'الإصدار' },
@@ -244,6 +279,45 @@ const translations = {
     en: 'Please login to continue',
     ar: 'يرجى تسجيل الدخول للمتابعة',
   },
+  
+   // Used by Profile screen's "no account" footer
+  noAccount: {
+    en: "Don't have an account?",
+    ar: 'ليس لديك حساب؟',
+  },
+
+  // Fallback text used in sub-headers when we only have a count
+  // (not strictly required, but nice to have)
+  review: {
+    en: 'review',
+    ar: 'مراجعة',
+  },
+
+  // Used by Profile → edit action on a location row
+  edit: {
+    en: 'Edit',
+    ar: 'تعديل',
+  },
+
+  // Used by Signup for optional disability field
+  organizationName: {
+    en: 'Organization name',
+    ar: 'اسم المنظمة',
+  },
+
+  disabilityOptional: {
+    en: 'Disability (optional)',
+    ar: 'الإعاقة (اختياري)',
+  },
+  
+  selectDisabilityType: { en: 'Select disability type...', ar: 'اختر نوع الإعاقة...' },
+  wheelchairImpairment: { en: 'Wheelchair/Mobility Impairment', ar: 'إعاقة حركية / كرسي متحرك' },
+  visualImpairment: { en: 'Visual Impairment', ar: 'إعاقة بصرية' },
+  hearingImpairment: { en: 'Hearing Impairment', ar: 'إعاقة سمعية' },
+  cognitiveDisability: { en: 'Cognitive Disability', ar: 'إعاقة ذهنية' },
+  multipleDisabilities: { en: 'Multiple Disabilities', ar: 'إعاقات متعددة' },
+  otherDisability: { en: 'Other', ar: 'أخرى' },
+
 };
 
 export default translations;

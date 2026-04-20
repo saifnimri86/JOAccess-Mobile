@@ -13,7 +13,8 @@
  */
 
 // ── Change this to your server URL ──
-const BASE_URL = 'https://joaccess.onrender.com';
+// USB development: adb reverse tcp:5000 tcp:5000 tunnels phone → this machine's localhost
+const BASE_URL = 'https://joaccess-backend.onrender.com';
 
 // The mobile API is mounted at /api/v1 (see api_blueprint.py)
 export const API_BASE = `${BASE_URL}/api/v1`;
@@ -35,6 +36,9 @@ export const JORDAN_BOUNDS = {
 };
 export const DEFAULT_ZOOM = 8;
 
+// Google Maps API Key for Places (New) autocomplete API
+export const GOOGLE_PLACES_API_KEY = "AIzaSyBK0MYlgq3VaDG2XgJ2ZpY5sm0Imhndv1I";
+
 export default {
   API_BASE,
   UPLOADS_BASE,
@@ -43,5 +47,6 @@ export default {
   JORDAN_CENTER,
   JORDAN_BOUNDS,
   DEFAULT_ZOOM,
+  GOOGLE_PLACES_API_KEY,
 };
 // this comment is from jameel
