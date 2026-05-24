@@ -1,28 +1,7 @@
-/**
- * AddEditLocationScreen (Phase 1.5)
- * =================================
- * Redesigned with the full design system. Preserves all original logic:
- *   - Bilingual name/description/address fields (EN + AR)
- *   - Category picker (bottom sheet)
- *   - Map tap to set coordinates
- *   - Accessibility feature chips
- *   - Photo picker (gallery + camera)
- *   - Create / Update via api.js
- *
- * Structural changes:
- *   - Uses FormField + PrimaryButton components
- *   - Category picker is a BottomSheet instead of a full-screen modal
- *   - Features are Chip-based (tap-to-toggle) instead of a checklist
- *   - Photos are a horizontal scroll with delete affordance
- *   - Map picker retains its WebView but with polished tile style
- *     matching high-contrast if that's on
- *   - Proper SafeAreaView with stack-screen back button
- */
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Image, Platform,
-  KeyboardAvoidingView, ActivityIndicator, PermissionsAndroid, FlatList,
+  KeyboardAvoidingView, ActivityIndicator, PermissionsAndroid, FlatList, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
@@ -34,7 +13,7 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAccessibility } from '../context/AccessibilityContext';
 import { useDialog } from '../context/DialogContext';
 import * as api from '../services/api';
-import { JORDAN_CENTER, JORDAN_BOUNDS, UPLOADS_BASE, GOOGLE_PLACES_API_KEY } from '../config';
+import { JORDAN_CENTER, JORDAN_BOUNDS, getUploadsBase, GOOGLE_PLACES_API_KEY } from '../config';
 
 import FormField from '../components/FormField';
 import PrimaryButton from '../components/PrimaryButton';
@@ -57,7 +36,6 @@ const FEATURES = [
   'wide_doorways', 'automatic_doors',
 ];
 
-// Accurate Jordan Border Polygon for strict validation (from web version)
 const JORDAN_POLYGON = [
   [32.393992, 35.545665],
   [32.709192, 35.719918],
@@ -80,7 +58,7 @@ const JORDAN_POLYGON = [
   [32.393992, 35.545665],
 ];
 
-// Point-in-polygon ray-casting check
+// ray-casting point-in-polygon
 function isPointInJordan(lat, lng) {
   let inside = false;
   for (let i = 0, j = JORDAN_POLYGON.length - 1; i < JORDAN_POLYGON.length; j = i++) {
@@ -101,7 +79,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
   const isEdit = route?.params?.locationId != null;
   const locationId = route?.params?.locationId;
 
-  // Form state
   const [name, setName] = useState('');
   const [nameAr, setNameAr] = useState('');
   const [description, setDescription] = useState('');
@@ -114,17 +91,16 @@ export default function AddEditLocationScreen({ route, navigation }) {
   const [selectedFeatures, setSelectedFeatures] = useState(new Set());
   const [photos, setPhotos] = useState([]);
   const [existingPhotos, setExistingPhotos] = useState([]);
+  const [removedExistingPhotos, setRemovedExistingPhotos] = useState(new Set());
   const [saving, setSaving] = useState(false);
   const [loadingData, setLoadingData] = useState(isEdit);
   const [showCategoryPicker, setShowCategoryPicker] = useState(false);
 
-  // Search Map state
   const [searchQuery, setSearchQuery] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [mapScrollLock, setMapScrollLock] = useState(false);
 
-  // Load existing data if editing
   useEffect(() => {
     if (!isEdit) return;
     (async () => {
@@ -142,7 +118,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
         setExistingPhotos(loc.photos || []);
         setSelectedFeatures(new Set(loc.accessibility_features?.map((f) => f.type) || []));
 
-        // Center map on existing location once the WebView loads
+        // center map on existing location once the webview loads
         setTimeout(() => {
           webViewRef.current?.injectJavaScript(`
             if (typeof map !== 'undefined') {
@@ -160,7 +136,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
     })();
   }, [isEdit, locationId]);
 
-  // Default map to user's current location (add mode only)
+  // default map to user's current location (add mode only)
   useEffect(() => {
     if (isEdit) return;
     (async () => {
@@ -174,6 +150,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
         Geolocation.getCurrentPosition(
           (position) => {
             const { latitude: lat, longitude: lng } = position.coords;
+            if (!isInJordan(lat, lng)) return;
             setLatitude(lat);
             setLongitude(lng);
             setTimeout(() => {
@@ -184,15 +161,60 @@ export default function AddEditLocationScreen({ route, navigation }) {
                 }
               `);
             }, 1000);
+            autofillFromCoords(lat, lng);
           },
-          () => { /* silently fall back to Jordan center */ },
+          () => {},
           { enableHighAccuracy: false, timeout: 10000, maximumAge: 10000 },
         );
-      } catch { /* ignore */ }
+      } catch {}
     })();
   }, [isEdit]);
 
-  // Check if coordinates fall within Jordan's actual borders (polygon)
+  // autofill blank name/address fields from gps reverse geocode (add mode only)
+  const autofillFromCoords = async (lat, lng) => {
+    try {
+      const fetchNearby = (languageCode) => fetch(
+        'https://places.googleapis.com/v1/places:searchNearby',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': GOOGLE_PLACES_API_KEY,
+            'X-Goog-FieldMask': 'places.displayName,places.formattedAddress',
+          },
+          body: JSON.stringify({
+            languageCode,
+            locationRestriction: {
+              circle: { center: { latitude: lat, longitude: lng }, radius: 100.0 },
+            },
+            maxResultCount: 1,
+            rankPreference: 'DISTANCE',
+          }),
+        },
+      ).then((r) => r.ok ? r.json() : null).catch(() => null);
+
+      const [enData, arData] = await Promise.all([fetchNearby('en'), fetchNearby('ar')]);
+      const enPlace = enData?.places?.[0];
+      const arPlace = arData?.places?.[0];
+      if (!enPlace && !arPlace) return;
+
+      const enName = enPlace?.displayName?.text || '';
+      const arName = arPlace?.displayName?.text || '';
+      const enAddr = enPlace?.formattedAddress || '';
+      const arAddr = arPlace?.formattedAddress || '';
+
+      // never clobber typed input
+      setName((prev) => prev || enName || arName);
+      setNameAr((prev) => prev || arName || enName);
+      setAddress((prev) => prev || enAddr || arAddr);
+      setAddressAr((prev) => prev || arAddr || enAddr);
+
+      if (enName || arName || enAddr || arAddr) {
+        announce(lang === 'ar' ? 'تم تعبئة بيانات الموقع الحالي' : 'Current location details filled');
+      }
+    } catch {}
+  };
+
   const isInJordan = (lat, lng) => isPointInJordan(lat, lng);
 
   const onWebViewMessage = (event) => {
@@ -228,7 +250,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
 
   const onSearchTextChange = (text) => {
     setSearchQuery(text);
-    // Clear previous timer
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
 
     if (!text.trim() || text.trim().length < 2) {
@@ -238,7 +259,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
     }
 
     setSearchLoading(true);
-    // Debounce: wait 300ms after user stops typing before firing
+    // 300ms debounce
     searchTimerRef.current = setTimeout(() => {
       fetchPlacesSuggestions(text.trim());
     }, 300);
@@ -262,7 +283,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
       const data = await response.json();
 
       if (!response.ok) {
-        // Show the actual API error so we can debug
         showDialog(
           'Places API Error',
           `Status: ${response.status}\n${data?.error?.message || JSON.stringify(data)}`,
@@ -285,7 +305,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
     }
   };
 
-  // Fetch place details in a specific language
   const fetchPlaceDetails = async (placeId, languageCode) => {
     const response = await fetch(`https://places.googleapis.com/v1/places/${placeId}?languageCode=${languageCode}`, {
       method: 'GET',
@@ -303,27 +322,22 @@ export default function AddEditLocationScreen({ route, navigation }) {
     setSuggestions([]);
     
     try {
-      // Fetch both English and Arabic details in parallel
       const [enData, arData] = await Promise.all([
         fetchPlaceDetails(placeId, 'en'),
         fetchPlaceDetails(placeId, 'ar'),
       ]);
 
-      // Extract names
       const enName = enData?.displayName?.text || '';
       const arName = arData?.displayName?.text || '';
       const enAddr = enData?.formattedAddress || '';
       const arAddr = arData?.formattedAddress || '';
 
-      // Fill English fields
       setName(enName || arName);
       setAddress(enAddr || arAddr);
 
-      // Fill Arabic fields — use Arabic if available, otherwise fall back to English
       setNameAr(arName || enName);
       setAddressAr(arAddr || enAddr);
 
-      // Set coordinates and pan map
       const loc = enData?.location || arData?.location;
       if (loc) {
         const { latitude: lat, longitude: lng } = loc;
@@ -334,7 +348,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
               ? 'هذا المكان خارج حدود الأردن. يمكنك فقط إضافة مواقع داخل الأردن.'
               : 'This place is outside Jordan. You can only add locations within Jordan.',
           );
-          // Clear the coordinates so user can't save
+          // clear so save is blocked
           setLatitude(null);
           setLongitude(null);
           return;
@@ -356,11 +370,32 @@ export default function AddEditLocationScreen({ route, navigation }) {
   };
 
   const pickFromGallery = () => {
+    const count = currentPhotoCount();
+    if (count >= MAX_PHOTOS) {
+      showDialog(
+        lang === 'ar' ? 'تم الوصول للحد الأقصى' : 'Photo limit reached',
+        lang === 'ar'
+          ? 'يمكنك إضافة 5 صور كحد أقصى لكل موقع.'
+          : 'You can add a maximum of 5 photos per location.',
+      );
+      return;
+    }
+    const remainingSlots = MAX_PHOTOS - count;
     launchImageLibrary(
-      { mediaType: 'photo', selectionLimit: 10, quality: 0.7, includeBase64: true },
+      { mediaType: 'photo', selectionLimit: remainingSlots, quality: 0.7, includeBase64: true },
       (response) => {
         if (response.didCancel || response.errorCode) return;
         if (response.assets) {
+          const oversized = response.assets.find((a) => (a.fileSize || 0) > MAX_PHOTO_BYTES);
+          if (oversized) {
+            showDialog(
+              lang === 'ar' ? 'الصورة كبيرة جداً' : 'Photo too large',
+              lang === 'ar'
+                ? 'يجب أن يكون حجم كل صورة أقل من 5 ميجابايت.'
+                : 'Each photo must be less than 5 MB.',
+            );
+            return;
+          }
           const newPhotos = response.assets.map((asset) => ({
             uri: asset.uri,
             filename: asset.fileName || `photo_${Date.now()}.jpg`,
@@ -372,13 +407,76 @@ export default function AddEditLocationScreen({ route, navigation }) {
     );
   };
 
-  const takePhoto = () => {
+  const showCameraPermissionDenied = () => {
+    showDialog(
+      lang === 'ar' ? 'إذن الكاميرا مطلوب' : 'Camera permission needed',
+      lang === 'ar'
+        ? 'لا يمكن التقاط الصور بدون إذن الكاميرا. الرجاء تمكينه من إعدادات التطبيق.'
+        : 'Cannot take photos without camera permission. Please enable it in your app settings.',
+      [
+        { text: lang === 'ar' ? 'فتح الإعدادات' : 'Open settings', onPress: () => Linking.openSettings() },
+        { text: lang === 'ar' ? 'إلغاء' : 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
+  const ensureCameraPermission = async () => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      const has = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA);
+      if (has) return true;
+      const result = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.CAMERA,
+        {
+          title: lang === 'ar' ? 'إذن الكاميرا' : 'Camera permission',
+          message: lang === 'ar'
+            ? 'يحتاج التطبيق إلى الوصول إلى الكاميرا لالتقاط الصور.'
+            : 'The app needs camera access to take photos.',
+          buttonPositive: lang === 'ar' ? 'موافق' : 'OK',
+          buttonNegative: lang === 'ar' ? 'إلغاء' : 'Cancel',
+        },
+      );
+      if (result === PermissionsAndroid.RESULTS.GRANTED) return true;
+      showCameraPermissionDenied();
+      return false;
+    } catch {
+      showCameraPermissionDenied();
+      return false;
+    }
+  };
+
+  const takePhoto = async () => {
+    if (currentPhotoCount() >= MAX_PHOTOS) {
+      showDialog(
+        lang === 'ar' ? 'تم الوصول للحد الأقصى' : 'Photo limit reached',
+        lang === 'ar'
+          ? 'يمكنك إضافة 5 صور كحد أقصى لكل موقع.'
+          : 'You can add a maximum of 5 photos per location.',
+      );
+      return;
+    }
+    const ok = await ensureCameraPermission();
+    if (!ok) return;
     launchCamera(
       { mediaType: 'photo', quality: 0.7, includeBase64: true },
       (response) => {
-        if (response.didCancel || response.errorCode) return;
+        if (response.didCancel) return;
+        if (response.errorCode) {
+          // ios surfaces 'permission' here; android may surface 'camera_unavailable'
+          if (response.errorCode === 'permission') showCameraPermissionDenied();
+          return;
+        }
         if (response.assets?.[0]) {
           const asset = response.assets[0];
+          if ((asset.fileSize || 0) > MAX_PHOTO_BYTES) {
+            showDialog(
+              lang === 'ar' ? 'الصورة كبيرة جداً' : 'Photo too large',
+              lang === 'ar'
+                ? 'يجب أن يكون حجم كل صورة أقل من 5 ميجابايت.'
+                : 'Each photo must be less than 5 MB.',
+            );
+            return;
+          }
           setPhotos((prev) => [...prev, {
             uri: asset.uri,
             filename: asset.fileName || `camera_${Date.now()}.jpg`,
@@ -396,6 +494,16 @@ export default function AddEditLocationScreen({ route, navigation }) {
       return next;
     });
   };
+
+  const removeExistingPhoto = (filename) => {
+    setRemovedExistingPhotos((prev) => new Set([...prev, filename]));
+  };
+
+  const MAX_PHOTOS = 5;
+  const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+
+  const currentPhotoCount = () =>
+    existingPhotos.filter((f) => !removedExistingPhotos.has(f)).length + photos.length;
 
   async function handleSave() {
     if (!name.trim())     { showDialog(t('error'), lang === 'ar' ? 'الاسم بالإنجليزية مطلوب' : 'English name required'); return; }
@@ -429,6 +537,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
         address_ar: addressAr.trim(),
         accessibility_features: Array.from(selectedFeatures),
         photos_base64: photos.map((p) => ({ filename: p.filename, data: p.base64 })),
+        removed_photos: [...removedExistingPhotos],
       };
 
       if (isEdit) {
@@ -446,7 +555,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
     }
   }
 
-  // Memoize the HTML so it only regenerates when theme.mode changes (not on every keystroke)
+  // memoized so it doesn't regenerate on every keystroke
   const pickerHtml = useMemo(
     () => generatePickerHtml(theme.mode, colorBlindMode, highContrast),
     [theme.mode, colorBlindMode, highContrast]
@@ -460,7 +569,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
         style={styles.root}
         edges={['top', 'left', 'right']}
       >
-      {/* Custom header with back button */}
       <View style={styles.topBar}>
         <AnimatedPressable
           onPress={() => navigation.goBack()}
@@ -482,7 +590,7 @@ export default function AddEditLocationScreen({ route, navigation }) {
             ? (lang === 'ar' ? 'تعديل المكان' : 'Edit location')
             : (lang === 'ar' ? 'إضافة مكان' : 'Add location')}
         </Text>
-        <View style={{ width: 40 }} />{/* spacer to center the title */}
+        <View style={{ width: 40 }} />
       </View>
 
       <KeyboardAvoidingView
@@ -496,7 +604,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
           showsVerticalScrollIndicator={false}
           scrollEnabled={!mapScrollLock}
         >
-          {/* ─── Search & Map picker ─── */}
           <StaggeredReveal index={0}>
             <SectionHeader
               title={lang === 'ar' ? 'البحث وموقع الخريطة' : 'Search & Map Location'}
@@ -583,7 +690,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
             </View>
           </StaggeredReveal>
 
-          {/* ─── Basic info ─── */}
           <StaggeredReveal index={1}>
             <SectionHeader
               title={lang === 'ar' ? 'المعلومات الأساسية' : 'Basic info'}
@@ -620,7 +726,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
             />
           </StaggeredReveal>
 
-          {/* ─── Category picker ─── */}
           <StaggeredReveal index={2}>
             <SectionHeader title={t('category')} icon="grid" align={textAlign} />
             <AnimatedPressable
@@ -656,7 +761,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
             </AnimatedPressable>
           </StaggeredReveal>
 
-          {/* ─── Address ─── */}
           <StaggeredReveal index={3}>
             <SectionHeader title={t('address')} icon="location" align={textAlign} />
             <FormField
@@ -673,9 +777,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
             />
           </StaggeredReveal>
 
-          {/* Map moved to the top */}
-
-          {/* ─── Features ─── */}
           <StaggeredReveal index={4}>
             <SectionHeader
               title={t('accessibilityFeatures')}
@@ -693,18 +794,20 @@ export default function AddEditLocationScreen({ route, navigation }) {
                   icon={theme.featureIcon[feat] || 'checkmark'}
                   selected={selectedFeatures.has(feat)}
                   onPress={() => toggleFeature(feat)}
-                  tone="success"
+                  tone="brand"
                   size="sm"
                 />
               ))}
             </View>
           </StaggeredReveal>
 
-          {/* ─── Photos ─── */}
           <StaggeredReveal index={5}>
             <SectionHeader
               title={lang === 'ar' ? 'الصور' : 'Photos'}
               icon="camera"
+              subtitle={lang === 'ar'
+                ? `${currentPhotoCount()} / 5 صور · الحد الأقصى 5 ميجابايت لكل صورة`
+                : `${currentPhotoCount()} / 5 photos · max 5 MB each`}
               align={textAlign}
             />
             <View style={styles.photoActions}>
@@ -753,14 +856,24 @@ export default function AddEditLocationScreen({ route, navigation }) {
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={{ gap: 10, paddingVertical: 4 }}
               >
-                {existingPhotos.map((filename, i) => (
-                  <View key={`existing-${i}`} style={styles.photoWrap}>
-                    <Image
-                      source={{ uri: `${UPLOADS_BASE}/${filename}` }}
-                      style={[styles.photo, { borderRadius: theme.radii.md }]}
-                    />
-                  </View>
-                ))}
+                {existingPhotos
+                  .filter((f) => !removedExistingPhotos.has(f))
+                  .map((filename, i) => (
+                    <View key={`existing-${i}`} style={styles.photoWrap}>
+                      <Image
+                        source={{ uri: `${getUploadsBase()}/${filename}` }}
+                        style={[styles.photo, { borderRadius: theme.radii.md }]}
+                      />
+                      <AnimatedPressable
+                        onPress={() => removeExistingPhoto(filename)}
+                        accessibilityLabel={lang === 'ar' ? 'حذف الصورة' : 'Remove photo'}
+                        hitSlop={6}
+                        style={[styles.photoRemove, { backgroundColor: theme.color.danger }]}
+                      >
+                        <Ionicons name="close" size={14} color="#FFFFFF" />
+                      </AnimatedPressable>
+                    </View>
+                  ))}
                 {photos.map((p, i) => (
                   <View key={`new-${i}`} style={styles.photoWrap}>
                     <Image source={{ uri: p.uri }} style={[styles.photo, { borderRadius: theme.radii.md }]} />
@@ -778,7 +891,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
             ) : null}
           </StaggeredReveal>
 
-          {/* ─── Submit ─── */}
           <StaggeredReveal index={6}>
             <View style={{ marginTop: 24 }}>
               <PrimaryButton
@@ -794,7 +906,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
         </ScrollView>
       </KeyboardAvoidingView>
 
-      {/* ═══ Category picker bottom sheet ═══ */}
       <BottomSheet
         visible={showCategoryPicker}
         onClose={() => setShowCategoryPicker(false)}
@@ -849,9 +960,6 @@ export default function AddEditLocationScreen({ route, navigation }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-// Leaflet HTML for the map picker
-// ═══════════════════════════════════════════════════════════
 function buildMapFilter(colorBlindMode, highContrast) {
   const parts = [];
   if (highContrast) parts.push('contrast(1.2) brightness(1.05)');
@@ -924,7 +1032,6 @@ function generatePickerHtml(themeMode, colorBlindMode = 'none', highContrast = f
 
     var marker = null;
 
-    // Accurate Jordan Border Polygon
     var JORDAN_POLY = [
       [32.393992, 35.545665],[32.709192, 35.719918],[32.312938, 36.834062],
       [33.378686, 38.792341],[32.161009, 39.195468],[32.010217, 39.004886],
@@ -962,7 +1069,7 @@ function generatePickerHtml(themeMode, colorBlindMode = 'none', highContrast = f
       return true;
     }
 
-    // Toast for out-of-bounds feedback
+    // out-of-bounds toast
     var toastEl = document.createElement('div');
     toastEl.id = 'bounds-toast';
     toastEl.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:8px;font-size:13px;font-family:sans-serif;z-index:9999;opacity:0;transition:opacity 0.3s;pointer-events:none;text-align:center;max-width:90%;';

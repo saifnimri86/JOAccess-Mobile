@@ -1,21 +1,11 @@
-/**
- * MapScreen (Phase 1.5)
- * =====================
- * Changes from Phase 1:
- *   - Uses cache-aware getLocations() — survives offline loads gracefully
- *   - Shows "using cached data" banner when locations come from cache
- *   - Shows "last updated X ago" timestamp
- *   - WebView now has cache enabled for tile fallback
- *   - Safe-area handling updated for Android 15 edge-to-edge
- *   - Bottom margin accounts for the floating tab bar
- *   - Map picker's WebView caches tiles locally (cacheEnabled=true)
- */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TextInput,
   Linking, Platform, PermissionsAndroid,
+  Modal, Image, FlatList, Dimensions, TouchableOpacity, AppState
 } from 'react-native';
+import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import Geolocation from 'react-native-geolocation-service';
@@ -24,7 +14,7 @@ import Animated, {
   useSharedValue, useAnimatedStyle, withSpring, withTiming,
 } from 'react-native-reanimated';
 
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useRoute } from '@react-navigation/native';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { useAccessibility } from '../context/AccessibilityContext';
@@ -32,7 +22,7 @@ import { useNetwork } from '../context/NetworkContext';
 import { useDialog } from '../context/DialogContext';
 import * as api from '../services/api';
 import { formatAgo } from '../services/cache';
-import { JORDAN_CENTER } from '../config';
+import { JORDAN_CENTER, getUploadsBase } from '../config';
 
 import ThemeCard from '../components/ThemeCard';
 import AnimatedPressable from '../components/AnimatedPressable';
@@ -41,6 +31,7 @@ import BottomSheet from '../components/BottomSheet';
 import SectionHeader from '../components/SectionHeader';
 import StaggeredReveal from '../components/StaggeredReveal';
 import SkeletonLoader from '../components/SkeletonLoader';
+import { spacing, radii, fontWeights } from '../utils/theme';
 
 const ALL_CATEGORIES = [
   'Restaurants & Cafes', 'Shopping Malls', 'Supermarkets', 'Healthcare',
@@ -70,6 +61,7 @@ export default function MapScreen({ navigation }) {
   const { isOnline, markOffline } = useNetwork();
   const { showDialog } = useDialog();
   const insets = useSafeAreaInsets();
+  const route = useRoute();
   const webViewRef = useRef(null);
   const webViewReady = useRef(false);
   const isFirstFocusRef = useRef(true);
@@ -98,15 +90,15 @@ export default function MapScreen({ navigation }) {
   const [reportDesc, setReportDesc] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
 
-  // ══════════════════════════════════════════════════════════
-  // Load locations — network-first with cache fallback
-  // ══════════════════════════════════════════════════════════
+  const [searchSuggestions, setSearchSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
   const loadLocations = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
       const data = await api.getLocations();
-      // api.js attaches these markers when returning from cache
+      // api.js attaches these markers on cache fallback
       if (data._fromCache) {
         setFromCache(true);
         setCacheTimestamp(data._lastUpdated);
@@ -126,7 +118,7 @@ export default function MapScreen({ navigation }) {
 
   useEffect(() => { loadLocations(); }, [loadLocations]);
 
-  // Silent refresh — updates data without showing the loading skeleton
+  // refreshes without showing the loading skeleton
   const silentRefresh = useCallback(async () => {
     try {
       const data = await api.getLocations();
@@ -139,24 +131,71 @@ export default function MapScreen({ navigation }) {
         setCacheTimestamp(null);
       }
       setLocations(data);
-    } catch { /* keep stale data visible */ }
+    } catch {}
   }, [markOffline]);
 
-  // Refresh when returning from AddEditLocationScreen (skip the very first focus)
+  // refresh on focus + poll while focused; pauses on other tabs
+  const MAP_POLL_INTERVAL_MS = 30 * 1000;
+
   useFocusEffect(useCallback(() => {
-    if (isFirstFocusRef.current) { isFirstFocusRef.current = false; return; }
-    silentRefresh();
+    if (isFirstFocusRef.current) {
+      isFirstFocusRef.current = false;
+    } else {
+      silentRefresh();
+    }
+    const id = setInterval(silentRefresh, MAP_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
   }, [silentRefresh]));
 
-  // Keep cache fresh every 5 minutes while the screen is mounted
   useEffect(() => {
-    const id = setInterval(silentRefresh, 5 * 60 * 1000);
-    return () => clearInterval(id);
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') silentRefresh();
+    });
+    return () => sub.remove();
   }, [silentRefresh]);
 
-  // ══════════════════════════════════════════════════════════
-  // Filter logic
-  // ══════════════════════════════════════════════════════════
+  // keep the open detail sheet in sync with the latest fetch
+  useEffect(() => {
+    setSelectedLocation((prev) => {
+      if (!prev) return prev;
+      const updated = locations.find((l) => l.id === prev.id);
+      return updated || prev;
+    });
+  }, [locations]);
+
+  // other tabs jump here by setting route.params.focusLocationId
+  const focusLocationId = route.params?.focusLocationId;
+  useEffect(() => {
+    if (focusLocationId == null) return;
+    const local = locations.find((l) => l.id === focusLocationId);
+    if (local) {
+      setSelectedLocation(local);
+      setShowDetail(true);
+      if (webViewRef.current && webViewReady.current) {
+        webViewRef.current.injectJavaScript(
+          `if(typeof map!=='undefined'){map.flyTo([${local.latitude},${local.longitude}],16,{duration:0.8});}true;`
+        );
+      }
+      navigation.setParams({ focusLocationId: undefined });
+      return;
+    }
+    // not in the list yet — direct fetch so the chat→map jump isn't a no-op
+    if (locations.length > 0) {
+      api.getLocation(focusLocationId).then((loc) => {
+        if (!loc) return;
+        setSelectedLocation(loc);
+        setShowDetail(true);
+        if (webViewRef.current && webViewReady.current
+            && loc.latitude != null && loc.longitude != null) {
+          webViewRef.current.injectJavaScript(
+            `if(typeof map!=='undefined'){map.flyTo([${loc.latitude},${loc.longitude}],16,{duration:0.8});}true;`
+          );
+        }
+      }).catch(() => {});
+      navigation.setParams({ focusLocationId: undefined });
+    }
+  }, [focusLocationId, locations, navigation]);
+
   const filteredLocations = useMemo(() => {
     return locations.filter((loc) => {
       if (!selectedCategories.has(loc.category)) return false;
@@ -194,12 +233,31 @@ export default function MapScreen({ navigation }) {
     }
   }, [resultCount, loading, announce, lang]);
 
+  useEffect(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q.length < 2) {
+      setSearchSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+    const matches = locations
+      .filter((loc) =>
+        (loc.name || '').toLowerCase().includes(q) ||
+        (loc.name_ar || '').toLowerCase().includes(q) ||
+        (loc.address || '').toLowerCase().includes(q) ||
+        (loc.address_ar || '').toLowerCase().includes(q)
+      )
+      .slice(0, 6);
+    setSearchSuggestions(matches);
+    setShowSuggestions(matches.length > 0);
+  }, [searchQuery, locations]);
+
   const mapHtml = useMemo(
     () => generateMapHtml(theme.mode, colorBlindMode, highContrast),
     [theme.mode, colorBlindMode, highContrast]
   );
 
-  // Inject markers into the live WebView — no full reload needed
+  // inject markers without a full webview reload
   const injectMarkers = useCallback((locs) => {
     if (!webViewRef.current || !webViewReady.current) return;
     const markersData = locs.map((loc) => ({
@@ -215,10 +273,9 @@ export default function MapScreen({ navigation }) {
     );
   }, [lang]);
 
-  // Reset readiness whenever the HTML template rebuilds (theme / colorblind / lang change)
+  // reset readiness when HTML template rebuilds (theme/lang change)
   useEffect(() => { webViewReady.current = false; }, [mapHtml]);
 
-  // Push updated markers whenever filters, search, or location data changes
   useEffect(() => { injectMarkers(filteredLocations); }, [filteredLocations, injectMarkers]);
 
   const onWebViewMessage = (event) => {
@@ -235,9 +292,6 @@ export default function MapScreen({ navigation }) {
     } catch { }
   };
 
-  // ══════════════════════════════════════════════════════════
-  // Locate me
-  // ══════════════════════════════════════════════════════════
   async function locateUser() {
     try {
       if (Platform.OS === 'android') {
@@ -308,6 +362,15 @@ export default function MapScreen({ navigation }) {
     setSelectedFeatures(new Set());
     announce(lang === 'ar' ? 'تم مسح عوامل التصفية' : 'Filters cleared');
   };
+
+  const handleSuggestionSelect = useCallback((loc) => {
+    setSearchQuery(lang === 'ar' ? (loc.name_ar || loc.name) : loc.name);
+    setSearchSuggestions([]);
+    setShowSuggestions(false);
+    setSelectedLocation(loc);
+    setShowDetail(true);
+    announce(getLocalized(loc, 'name'));
+  }, [lang, announce, getLocalized]);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
@@ -382,7 +445,6 @@ export default function MapScreen({ navigation }) {
         style={s.root}
         edges={['left', 'right']}
       >
-        {/* Map — fills the whole screen */}
         {loading ? (
           <MapSkeleton />
         ) : loadError ? (
@@ -408,7 +470,6 @@ export default function MapScreen({ navigation }) {
           />
         )}
 
-        {/* Floating glass search bar */}
         <View
           style={[s.searchBarContainer, { top: insets.top + 8 }]}
           pointerEvents="box-none"
@@ -437,7 +498,7 @@ export default function MapScreen({ navigation }) {
               />
               {searchQuery.length > 0 ? (
                 <AnimatedPressable
-                  onPress={() => setSearchQuery('')}
+                  onPress={() => { setSearchQuery(''); setSearchSuggestions([]); setShowSuggestions(false); }}
                   accessibilityLabel={lang === 'ar' ? 'مسح البحث' : 'Clear search'}
                   hitSlop={10}
                   style={{ padding: 4 }}
@@ -447,7 +508,7 @@ export default function MapScreen({ navigation }) {
               ) : null}
               <AnimatedPressable
                 onPressIn={() => {
-                  // Break out of the synchronous render queue to let the button scale animation play natively!
+                  // break out of render queue so the scale animation plays
                   setTimeout(() => setShowFilters(true), 16);
                 }}
                 accessibilityLabel={lang === 'ar' ? 'عوامل التصفية' : 'Filters'}
@@ -458,15 +519,69 @@ export default function MapScreen({ navigation }) {
               >
                 <Ionicons name="options-outline" size={18} color={theme.color.textOnBrand} />
                 {activeFilterCount > 0 ? (
-                  <View style={[s.filterBadge, { backgroundColor: theme.color.star }]}>
-                    <Text style={s.filterBadgeText}>{activeFilterCount}</Text>
+                  <View style={[s.filterBadge, {
+                    backgroundColor: theme.color.star,
+                    borderColor: theme.color.surface,
+                  }]}>
+                    <Text style={[s.filterBadgeText, {
+                      color: theme.color.text,
+                      fontFamily: theme.fontFamily,
+                    }]}>{activeFilterCount}</Text>
                   </View>
                 ) : null}
               </AnimatedPressable>
             </View>
           </ThemeCard>
 
-          {/* Result/offline pill */}
+          {showSuggestions ? (
+            <View style={[s.suggestionsDropdown, {
+              backgroundColor: theme.color.surface,
+              borderColor: theme.color.border,
+              borderRadius: theme.radii.md,
+              ...theme.elevation.md,
+            }]}>
+              {searchSuggestions.map((loc, i) => (
+                <AnimatedPressable
+                  key={loc.id}
+                  onPress={() => handleSuggestionSelect(loc)}
+                  accessibilityRole="button"
+                  accessibilityLabel={getLocalized(loc, 'name')}
+                  style={[s.suggestionItem, {
+                    borderBottomColor: theme.color.border,
+                    borderBottomWidth: i < searchSuggestions.length - 1 ? StyleSheet.hairlineWidth : 0,
+                  }]}
+                >
+                  <View style={[s.suggestionIconBox, {
+                    backgroundColor: theme.categoryColor?.[loc.category] || theme.color.brand,
+                  }]}>
+                    <Ionicons name={theme.categoryIcon?.[loc.category] || 'pin'} size={14} color="#FFF" />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 10 }}>
+                    <Text style={{
+                      color: theme.color.text,
+                      fontFamily: theme.fontFamily,
+                      fontSize: scale(theme.fontSizes.sm),
+                      fontWeight: '600',
+                    }} numberOfLines={1}>
+                      {getLocalized(loc, 'name')}
+                    </Text>
+                    {getLocalized(loc, 'address') ? (
+                      <Text style={{
+                        color: theme.color.textMuted,
+                        fontFamily: theme.fontFamily,
+                        fontSize: scale(theme.fontSizes.xs),
+                        marginTop: 1,
+                      }} numberOfLines={1}>
+                        {getLocalized(loc, 'address')}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Ionicons name="chevron-forward" size={14} color={theme.color.textMuted} />
+                </AnimatedPressable>
+              ))}
+            </View>
+          ) : null}
+
           {!loading && !loadError ? (
             <View style={s.pillRow}>
               <ResultCountPill count={resultCount} />
@@ -475,7 +590,6 @@ export default function MapScreen({ navigation }) {
           ) : null}
         </View>
 
-        {/* Locate-me FAB */}
         <View
           style={[s.fabContainer, { bottom: Math.max(insets.bottom, 8) + 90 }]}
           pointerEvents="box-none"
@@ -495,59 +609,34 @@ export default function MapScreen({ navigation }) {
           </AnimatedPressable>
         </View>
 
-        {/* Filter sheet */}
         <BottomSheet
           visible={showFilters}
           onClose={() => setShowFilters(false)}
           title={t('filters')}
           scrollable
           footer={
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <AnimatedPressable
-                onPress={clearFilters}
-                accessibilityLabel={t('clearFilters')}
-                style={[
-                  s.footerBtn,
-                  {
-                    backgroundColor: theme.color.surface,
-                    borderColor: theme.color.border,
-                    borderWidth: 1,
-                    borderRadius: theme.radii.md,
-                  },
-                ]}
-              >
-                <Text style={{
-                  color: theme.color.textMuted,
-                  fontSize: scale(theme.fontSizes.md),
-                  fontWeight: theme.fontWeights.semibold,
-                  fontFamily: theme.fontFamily,
-                  textAlign: 'center',
-                  flexShrink: 1,
-                }}>{t('clearFilters')}</Text>
-              </AnimatedPressable>
-              <AnimatedPressable
-                onPress={() => {
-                  setShowFilters(false);
-                  announce(lang === 'ar'
-                    ? `تم تطبيق التصفية: ${resultCount} نتيجة`
-                    : `Filters applied: ${resultCount} ${resultCount === 1 ? 'result' : 'results'}`);
-                }}
-                accessibilityLabel={t('applyFilters')}
-                style={[
-                  s.footerBtn,
-                  { backgroundColor: theme.color.brand, borderRadius: theme.radii.md },
-                ]}
-              >
-                <Text style={{
-                  color: theme.color.textOnBrand,
-                  fontSize: scale(theme.fontSizes.md),
-                  fontWeight: theme.fontWeights.bold,
-                  fontFamily: theme.fontFamily,
-                  textAlign: 'center',
-                  flexShrink: 1,
-                }}>{t('applyFilters')}</Text>
-              </AnimatedPressable>
-            </View>
+            <AnimatedPressable
+              onPress={clearFilters}
+              accessibilityLabel={t('clearFilters')}
+              style={[
+                s.footerBtn,
+                {
+                  backgroundColor: theme.color.brand,
+                  borderColor: theme.color.brand,
+                  borderWidth: 1,
+                  borderRadius: theme.radii.md,
+                },
+              ]}
+            >
+              <Text style={{
+                color: theme.color.textOnBrand,
+                fontSize: scale(theme.fontSizes.md),
+                fontWeight: theme.fontWeights.bold,
+                fontFamily: theme.fontFamily,
+                textAlign: 'center',
+                flexShrink: 1,
+              }}>{t('clearFilters')}</Text>
+            </AnimatedPressable>
           }
         >
           <SectionHeader
@@ -588,14 +677,13 @@ export default function MapScreen({ navigation }) {
                 icon={theme.featureIcon[feat] || 'checkmark'}
                 selected={selectedFeatures.has(feat)}
                 onPress={() => toggleFeature(feat)}
-                tone="success"
+                tone="brand"
                 size="sm"
               />
             ))}
           </View>
         </BottomSheet>
 
-        {/* Detail sheet */}
         <BottomSheet visible={showDetail} onClose={() => setShowDetail(false)} scrollable>
           {selectedLocation ? (
             <LocationDetail
@@ -611,12 +699,15 @@ export default function MapScreen({ navigation }) {
                 setReportReason(''); setReportDesc('');
                 setShowReportModal(true);
               }}
+              onViewAllReviews={() => {
+                setShowDetail(false);
+                navigation.navigate('LocationReviews', { location: selectedLocation });
+              }}
             />
           ) : null}
         </BottomSheet>
 
-        {/* Rate sheet */}
-        <BottomSheet visible={showRateModal} onClose={() => setShowRateModal(false)} title={t('rateLocation')}>
+        <BottomSheet visible={showRateModal} onClose={() => setShowRateModal(false)} title={t('rateLocation')} avoidKeyboard>
           <RatePanel
             stars={rateStars} setStars={setRateStars}
             comment={rateComment} setComment={setRateComment}
@@ -626,8 +717,7 @@ export default function MapScreen({ navigation }) {
           />
         </BottomSheet>
 
-        {/* Report sheet */}
-        <BottomSheet visible={showReportModal} onClose={() => setShowReportModal(false)} title={t('reportLocation')}>
+        <BottomSheet visible={showReportModal} onClose={() => setShowReportModal(false)} title={t('reportLocation')} avoidKeyboard>
           <ReportPanel
             reason={reportReason} setReason={setReportReason}
             desc={reportDesc} setDesc={setReportDesc}
@@ -641,17 +731,13 @@ export default function MapScreen({ navigation }) {
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-// Sub-components
-// ═══════════════════════════════════════════════════════════
-
 function ResultCountPill({ count }) {
   const { theme, scale } = useAccessibility();
   const { lang } = useLanguage();
   return (
     <View
       style={{
-        paddingHorizontal: 12, paddingVertical: 6,
+        paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.xs + 2,
         borderRadius: theme.radii.pill,
         backgroundColor: theme.color.glassBgStrong,
         borderWidth: 1, borderColor: theme.color.glassBorder,
@@ -679,8 +765,8 @@ function OfflinePill({ timestamp }) {
   return (
     <View
       style={{
-        flexDirection: 'row', alignItems: 'center', gap: 4,
-        paddingHorizontal: 10, paddingVertical: 6,
+        flexDirection: 'row', alignItems: 'center', gap: theme.spacing.xs,
+        paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.xs + 2,
         borderRadius: theme.radii.pill,
         backgroundColor: theme.color.warningBg,
         borderWidth: 1, borderColor: theme.color.warning,
@@ -764,10 +850,23 @@ function ErrorState({ message, onRetry }) {
   );
 }
 
-function LocationDetail({ location, onDirections, onRate, onReport }) {
-  const { t, lang, getLocalized } = useLanguage();
+function getLatestReview(reviews) {
+  if (!reviews || reviews.length === 0) return null;
+  let latest = reviews[0];
+  let latestTs = latest?.created_at ? new Date(latest.created_at).getTime() : 0;
+  for (let i = 1; i < reviews.length; i++) {
+    const ts = reviews[i]?.created_at ? new Date(reviews[i].created_at).getTime() : 0;
+    if (ts > latestTs) { latest = reviews[i]; latestTs = ts; }
+  }
+  return latest;
+}
+
+function LocationDetail({ location, onDirections, onRate, onReport, onViewAllReviews }) {
+  const { t, lang, isRTL, getLocalized } = useLanguage();
   const { theme, scale } = useAccessibility();
   const categoryAccent = theme.categoryColor[location.category] || theme.color.brand;
+  const [fullScreenIndex, setFullScreenIndex] = useState(null);
+  const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
   return (
     <View>
@@ -853,7 +952,9 @@ function LocationDetail({ location, onDirections, onRate, onReport }) {
                   key={`${f.type}-${i}`}
                   label={t(f.type)}
                   icon={theme.featureIcon[f.type] || 'checkmark-circle'}
-                  tone="success" selected size="sm"
+                  tone="brand"
+                  size="sm"
+                  style={{ borderColor: theme.color.brand }}
                 />
               ))}
             </View>
@@ -861,22 +962,94 @@ function LocationDetail({ location, onDirections, onRate, onReport }) {
         </StaggeredReveal>
       ) : null}
 
-      {location.reviews?.length > 0 ? (
+      {location.photos?.length > 0 ? (
         <StaggeredReveal index={5}>
           <View style={detailStyles.section}>
-            <SectionHeader
-              title={t('reviews')}
-              icon="chatbubbles"
-              subtitle={`${location.reviews.length} ${location.reviews.length === 1 ? 'review' : t('reviews')}`}
-            />
-            {location.reviews.slice(0, 5).map((r, i) => (
-              <ReviewItem key={i} review={r} />
-            ))}
+            <SectionHeader title={t('photos')} icon="images" />
+            <GHScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingVertical: 8, gap: 12 }}
+              waitFor={[]}
+            >
+              {location.photos.map((photoUrl, i) => {
+                const uri = photoUrl.startsWith('http') ? photoUrl : `${getUploadsBase()}/${photoUrl}`;
+                return (
+                  <View key={i} style={{ width: 140 }}>
+                    <TouchableOpacity onPress={() => setFullScreenIndex(i)} activeOpacity={0.8}>
+                      <Image
+                        source={{ uri }}
+                        style={{ width: 140, height: 100, borderRadius: theme.radii.md, backgroundColor: theme.color.surfaceHover }}
+                        resizeMode="cover"
+                      />
+                    </TouchableOpacity>
+                    <Text style={{
+                      color: theme.color.textMuted,
+                      fontSize: scale(theme.fontSizes.xs),
+                      fontFamily: theme.fontFamily,
+                      marginTop: 4,
+                      textAlign: 'center',
+                    }} numberOfLines={1}>
+                      {t('uploadedBy')} {location.creator || t('anonymous')}
+                    </Text>
+                  </View>
+                );
+              })}
+            </GHScrollView>
           </View>
         </StaggeredReveal>
       ) : null}
 
-      <StaggeredReveal index={6}>
+      {location.reviews?.length > 0 ? (
+        <StaggeredReveal index={6}>
+          <View style={detailStyles.section}>
+            <SectionHeader
+              title={t('latestReview')}
+              icon="chatbubbles"
+              subtitle={`${location.reviews.length} ${location.reviews.length === 1 ? t('review') : t('reviews')}`}
+            />
+            <ReviewItem review={getLatestReview(location.reviews)} />
+            <AnimatedPressable
+              onPress={onViewAllReviews}
+              accessibilityRole="button"
+              accessibilityLabel={t('viewAllReviews')}
+              style={[
+                detailStyles.viewAllBtn,
+                {
+                  backgroundColor: theme.color.surface,
+                  borderColor: theme.color.brand,
+                  borderRadius: theme.radii.md,
+                },
+              ]}
+            >
+              <Ionicons
+                name="list"
+                size={16}
+                color={theme.color.textBrand}
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={{
+                  color: theme.color.textBrand,
+                  fontSize: scale(theme.fontSizes.sm),
+                  fontWeight: theme.fontWeights.semibold,
+                  fontFamily: theme.fontFamily,
+                }}
+              >
+                {t('viewAllReviews')} ({location.reviews.length})
+              </Text>
+              <Ionicons
+                name={isRTL ? 'chevron-back' : 'chevron-forward'}
+                size={16}
+                color={theme.color.textBrand}
+                style={{ marginLeft: 6 }}
+              />
+            </AnimatedPressable>
+          </View>
+        </StaggeredReveal>
+      ) : null}
+
+      <StaggeredReveal index={7}>
         <View style={detailStyles.actionRow}>
           <ActionButton icon="navigate" label={t('directions')} onPress={onDirections} tone="brand" />
           <ActionButton icon="star" label={t('rateLocation')} onPress={onRate} tone="secondary" />
@@ -885,6 +1058,92 @@ function LocationDetail({ location, onDirections, onRate, onReport }) {
       </StaggeredReveal>
 
       <View style={{ height: 20 }} />
+
+      <Modal
+        visible={fullScreenIndex !== null}
+        transparent={true}
+        onRequestClose={() => setFullScreenIndex(null)}
+        animationType="fade"
+        statusBarTranslucent
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)' }}>
+          <TouchableOpacity
+            style={{
+              position: 'absolute', top: 50, right: theme.spacing.xl,
+              zIndex: 20, padding: theme.spacing.sm + 2,
+              backgroundColor: 'rgba(255,255,255,0.15)',
+              borderRadius: theme.radii.pill,
+            }}
+            onPress={() => setFullScreenIndex(null)}
+          >
+            <Ionicons name="close" size={24} color="#FFF" />
+          </TouchableOpacity>
+
+          {fullScreenIndex !== null && (
+            <View style={{ position: 'absolute', top: 55, left: theme.spacing.xl, zIndex: 20 }}>
+              <Text style={{
+                color: 'rgba(255,255,255,0.7)',
+                fontSize: scale(theme.fontSizes.sm),
+                fontWeight: theme.fontWeights.semibold,
+                fontFamily: theme.fontFamily,
+              }}>
+                {fullScreenIndex + 1} / {location.photos.length}
+              </Text>
+            </View>
+          )}
+
+          {fullScreenIndex !== null && (
+            <FlatList
+              data={location.photos}
+              keyExtractor={(_, i) => String(i)}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={fullScreenIndex}
+              getItemLayout={(_, index) => ({ length: SCREEN_W, offset: SCREEN_W * index, index })}
+              onMomentumScrollEnd={e => {
+                const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
+                setFullScreenIndex(idx);
+              }}
+              renderItem={({ item: photoUrl }) => {
+                const uri = photoUrl.startsWith('http') ? photoUrl : `${getUploadsBase()}/${photoUrl}`;
+                return (
+                  <View style={{ width: SCREEN_W, height: SCREEN_H, justifyContent: 'center', alignItems: 'center' }}>
+                    <Image source={{ uri }} style={{ width: SCREEN_W, height: SCREEN_H * 0.75 }} resizeMode="contain" />
+                    <Text style={{
+                      color: 'rgba(255,255,255,0.55)',
+                      fontSize: scale(theme.fontSizes.sm),
+                      fontFamily: theme.fontFamily,
+                      marginTop: theme.spacing.md,
+                    }}>
+                      {t('uploadedBy')} {location.creator || t('anonymous')}
+                    </Text>
+                  </View>
+                );
+              }}
+            />
+          )}
+
+          {location.photos?.length > 1 && (
+            <View style={{
+              position: 'absolute', bottom: 40, alignSelf: 'center',
+              flexDirection: 'row', gap: theme.spacing.sm,
+            }}>
+              {location.photos.map((_, i) => (
+                <View
+                  key={i}
+                  style={{
+                    width: i === fullScreenIndex ? 18 : 8,
+                    height: 8,
+                    borderRadius: theme.radii.pill,
+                    backgroundColor: i === fullScreenIndex ? '#FFF' : 'rgba(255,255,255,0.35)',
+                  }}
+                />
+              ))}
+            </View>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -895,9 +1154,10 @@ function ReviewItem({ review }) {
     <View style={[
       detailStyles.reviewItem,
       {
-        backgroundColor: theme.color.bgSunken,
+        backgroundColor: theme.color.surface,
         borderRadius: theme.radii.md,
         borderColor: theme.color.border,
+        ...theme.elevation.sm,
       },
     ]}>
       <View style={detailStyles.reviewHeader}>
@@ -1115,11 +1375,11 @@ function ReportPanel({ reason, setReason, desc, setDesc, submitting, onSubmit, o
       }}>{lang === 'ar' ? 'ما سبب الإبلاغ؟' : 'What\'s the issue?'}</Text>
 
       {REPORT_REASONS.map((opt, i) => {
-        const selected = reason === opt.val;
+        const selected = reason === opt.key;
         return (
           <AnimatedPressable
-            key={opt.val}
-            onPress={() => setReason(opt.val)}
+            key={opt.key}
+            onPress={() => setReason(opt.key)}
             accessibilityLabel={t(opt.key)}
             accessibilityRole="radio"
             accessibilityState={{ selected }}
@@ -1211,9 +1471,6 @@ function ReportPanel({ reason, setReason, desc, setDesc, submitting, onSubmit, o
   );
 }
 
-// ═══════════════════════════════════════════════════════════
-// Leaflet HTML for the map (with cache-friendly directives)
-// ═══════════════════════════════════════════════════════════
 function buildMapFilter(colorBlindMode, highContrast) {
   const parts = [];
   if (highContrast) parts.push('contrast(1.2) brightness(1.05)');
@@ -1224,9 +1481,9 @@ function buildMapFilter(colorBlindMode, highContrast) {
 
 function buildColorBlindSVG(colorBlindMode) {
   const matrices = {
-    protanopia:   '0.567 0.433 0     0 0  0.558 0.442 0     0 0  0     0.242 0.758 0 0  0 0 0 1 0',
+    protanopia: '0.567 0.433 0     0 0  0.558 0.442 0     0 0  0     0.242 0.758 0 0  0 0 0 1 0',
     deuteranopia: '0.625 0.375 0     0 0  0.7   0.3   0     0 0  0     0.3   0.7   0 0  0 0 0 1 0',
-    tritanopia:   '0.95  0.05  0     0 0  0     0.433 0.567 0 0  0     0.475 0.525 0 0  0 0 0 1 0',
+    tritanopia: '0.95  0.05  0     0 0  0     0.433 0.567 0 0  0     0.475 0.525 0 0  0 0 0 1 0',
   };
   const m = matrices[colorBlindMode];
   if (!m) return '';
@@ -1241,7 +1498,7 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
   const mapFilter = buildMapFilter(colorBlindMode, highContrast);
 
   const maroon = isDark ? '#B33838' : '#800000';
-  const maroonGlow = isDark ? 'rgba(179,56,56,0.55)' : 'rgba(128,0,0,0.45)';
+  const maroonGlow = isDark ? 'rgba(179,56,56,0.65)' : 'rgba(128,0,0,0.55)';
 
   return `
 <!DOCTYPE html>
@@ -1261,7 +1518,10 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
     }
     .jo-marker-wrapper {
       width: 32px; height: 40px; position: relative;
-      filter: drop-shadow(0 4px 10px ${maroonGlow});
+      filter: drop-shadow(0 4px 14px ${maroonGlow});
+    }
+    .jo-marker-wrapper.crowded {
+      filter: drop-shadow(0 2px 3px ${isDark ? 'rgba(179,56,56,0.12)' : 'rgba(128,0,0,0.10)'});
     }
     .jo-marker {
       width: 28px; height: 28px;
@@ -1278,14 +1538,6 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
       position: absolute; border-radius: 50%;
       top: 50%; left: 50%;
       transform: translate(-50%, -50%);
-    }
-    .jo-marker.verified::before {
-      content: ''; position: absolute;
-      width: 12px; height: 12px; border-radius: 50%;
-      background: ${isDark ? '#4FB06E' : '#1E6B3A'};
-      top: -4px; right: -4px;
-      border: 2px solid ${isDark ? '#0A0707' : '#FFFFFF'};
-      transform: rotate(45deg); z-index: 2;
     }
     .marker-tooltip {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -1326,17 +1578,34 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
       attribution: '© OpenStreetMap © CARTO',
       maxZoom: 19,
       subdomains: 'abcd',
-      // crossOrigin is critical for the WebView to cache tiles properly
+      // crossOrigin needed for webview tile caching
       crossOrigin: true
     }).addTo(map);
 
     window._markerGroup = L.layerGroup().addTo(map);
     window.updateMarkers = function(markers) {
       window._markerGroup.clearLayers();
-      markers.forEach(function(m) {
+
+      // proximity crowding: tag markers with 2+ neighbours within ~500m
+      var CROWD_DEG = 0.027;
+      var CROWD_THRESH = 3;
+      var crowded = markers.map(function(m) {
+        var count = 0;
+        for (var j = 0; j < markers.length; j++) {
+          if (markers[j] === m) continue;
+          var dlat = markers[j].lat - m.lat;
+          var dlng = markers[j].lng - m.lng;
+          if (Math.sqrt(dlat * dlat + dlng * dlng) < CROWD_DEG) count++;
+          if (count >= CROWD_THRESH) break;
+        }
+        return count >= CROWD_THRESH;
+      });
+
+      markers.forEach(function(m, idx) {
         var verifiedClass = m.verified ? ' verified' : '';
+        var crowdedClass  = crowded[idx] ? ' crowded' : '';
         var icon = L.divIcon({
-          html: '<div class="jo-marker-wrapper"><div class="jo-marker' + verifiedClass + '"></div></div>',
+          html: '<div class="jo-marker-wrapper' + verifiedClass + crowdedClass + '"><div class="jo-marker"></div></div>',
           className: 'jo-marker-icon',
           iconSize: [32, 40],
           iconAnchor: [16, 36],
@@ -1358,9 +1627,6 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
   `;
 }
 
-// ═══════════════════════════════════════════════════════════
-// Styles
-// ═══════════════════════════════════════════════════════════
 const makeStyles = (theme, insets) => StyleSheet.create({
   root: { flex: 1 },
   map: { flex: 1 },
@@ -1379,17 +1645,17 @@ const makeStyles = (theme, insets) => StyleSheet.create({
   },
   searchInput: { flex: 1, padding: 0 },
   filterButton: {
-    width: 36, height: 36, borderRadius: 18,
+    width: 36, height: 36, borderRadius: radii.pill,
     justifyContent: 'center', alignItems: 'center',
   },
   filterBadge: {
-    position: 'absolute', top: -4, right: -4,
-    width: 18, height: 18, borderRadius: 9,
+    position: 'absolute', top: -spacing.xs, right: -spacing.xs,
+    width: 18, height: 18, borderRadius: radii.pill,
     justifyContent: 'center', alignItems: 'center',
-    borderWidth: 2, borderColor: '#FFFFFF',
+    borderWidth: 2,
   },
   filterBadgeText: {
-    color: '#1A1512', fontSize: 10, fontWeight: '800',
+    fontSize: 10, fontWeight: fontWeights.heavy,
   },
 
   pillRow: {
@@ -1401,10 +1667,10 @@ const makeStyles = (theme, insets) => StyleSheet.create({
   },
 
   fabContainer: {
-    position: 'absolute', right: 16,
+    position: 'absolute', right: spacing.lg,
   },
   fab: {
-    width: 52, height: 52, borderRadius: 26,
+    width: 52, height: 52, borderRadius: radii.pill,
     justifyContent: 'center', alignItems: 'center',
     borderWidth: StyleSheet.hairlineWidth,
   },
@@ -1419,6 +1685,24 @@ const makeStyles = (theme, insets) => StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     minHeight: 48,
   },
+
+  suggestionsDropdown: {
+    marginTop: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  suggestionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    minHeight: 52,
+  },
+  suggestionIconBox: {
+    width: 28, height: 28, borderRadius: radii.pill,
+    justifyContent: 'center', alignItems: 'center',
+    flexShrink: 0,
+  },
 });
 
 const detailStyles = StyleSheet.create({
@@ -1427,7 +1711,7 @@ const detailStyles = StyleSheet.create({
     padding: 16, gap: 12, marginBottom: 16,
   },
   heroIconBox: {
-    width: 48, height: 48, borderRadius: 24,
+    width: 48, height: 48, borderRadius: radii.pill,
     backgroundColor: 'rgba(255,255,255,0.2)',
     justifyContent: 'center', alignItems: 'center',
   },
@@ -1447,7 +1731,7 @@ const detailStyles = StyleSheet.create({
   },
   reviewUserRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reviewAvatar: {
-    width: 22, height: 22, borderRadius: 11,
+    width: 22, height: 22, borderRadius: radii.pill,
     justifyContent: 'center', alignItems: 'center',
   },
   actionRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
@@ -1455,6 +1739,13 @@ const detailStyles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingHorizontal: 14, paddingVertical: 10,
     minHeight: 44, flexGrow: 1,
+  },
+  viewAllBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 14, paddingVertical: 12,
+    marginTop: 8,
+    borderWidth: 1.5,
+    minHeight: 44,
   },
 });
 

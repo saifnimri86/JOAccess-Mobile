@@ -1,26 +1,5 @@
-/**
- * TalkBackGuide
- * =============
- * A dismissible inline help card shown in Settings when:
- *   - The OS screen reader is OFF (we don't nag users who already use it), AND
- *   - The user hasn't dismissed the guide before.
- *
- * Why it exists:
- *   JOAccess is an accessibility app. Many of its users will benefit from
- *   TalkBack/VoiceOver being on. Rather than assuming they know how to
- *   enable it, we offer a one-tap deep link into the system settings page
- *   with a short, bilingual explanation.
- *
- * Persistence:
- *   Dismissal state is kept in EncryptedStorage so it survives reinstalls
- *   of the app bundle but is local to the device. Key: `joaccess_tbguide_dismissed`.
- *
- * Props:
- *   onOpenSettings  function — called when the user taps "Open"
- *
- * Behavior:
- *   Renders nothing if dismissed or if a screen reader is already active.
- */
+// inline help card shown in settings when the os screen reader is off
+// and the user hasn't dismissed the guide before.
 
 import React, { useEffect, useState, useCallback } from 'react';
 import { View, Text, StyleSheet, Platform, Linking } from 'react-native';
@@ -41,7 +20,6 @@ export default function TalkBackGuide() {
   const [loaded, setLoaded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  // Check the persisted dismissed flag on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -49,7 +27,6 @@ export default function TalkBackGuide() {
         const v = await EncryptedStorage.getItem(DISMISS_KEY);
         if (!cancelled) setDismissed(v === '1');
       } catch {
-        // If storage fails (rare), default to "not dismissed" and show it
       } finally {
         if (!cancelled) setLoaded(true);
       }
@@ -69,17 +46,13 @@ export default function TalkBackGuide() {
         Linking.openSettings().catch(() => {});
       });
     } else {
-      // iOS doesn't expose a direct deep link to the Accessibility page —
-      // falling back to the app-specific settings screen is the closest
-      // we can get from a sandboxed app.
+      // ios has no direct accessibility deep link; app settings is closest
       Linking.openURL('app-settings:').catch(() => {
         Linking.openSettings().catch(() => {});
       });
     }
   }, []);
 
-  // Guard: do nothing until we've read the flag, and hide when
-  // already-dismissed or a screen reader is already active.
   if (!loaded) return null;
   if (dismissed) return null;
   if (screenReaderEnabled) return null;
@@ -108,7 +81,6 @@ export default function TalkBackGuide() {
           : `Screen reader tip. ${readerName} is not active.`
       }
     >
-      {/* Top row — icon + close button */}
       <View style={styles.topRow}>
         <View style={[styles.iconBox, { backgroundColor: theme.color.brandMuted }]}>
           <Ionicons name="mic-circle" size={24} color={theme.color.textBrand} />
@@ -130,7 +102,6 @@ export default function TalkBackGuide() {
         </AnimatedPressable>
       </View>
 
-      {/* Title */}
       <Text
         style={{
           fontSize: scale(theme.fontSizes.lg),
@@ -147,7 +118,6 @@ export default function TalkBackGuide() {
           : `Use ${readerName} with JOAccess`}
       </Text>
 
-      {/* Body */}
       <Text
         style={{
           fontSize: scale(theme.fontSizes.sm),
@@ -163,7 +133,6 @@ export default function TalkBackGuide() {
           : `${readerName} is your phone's built-in screen reader. JOAccess is fully wired for it — every button and menu has clear labels and hints. Open your system settings to turn it on.`}
       </Text>
 
-      {/* Action row */}
       <View style={[styles.actions, { flexDirection: isRTL ? 'row-reverse' : 'row' }]}>
         <AnimatedPressable
           onPress={openSystemAccessibility}
@@ -233,9 +202,7 @@ export default function TalkBackGuide() {
 }
 
 const styles = StyleSheet.create({
-  card: {
-    // Card-level overrides live in the inline style for theme reactivity
-  },
+  card: {},
   topRow: {
     flexDirection: 'row',
     alignItems: 'center',

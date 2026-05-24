@@ -1,15 +1,3 @@
-/**
- * SectionHeader
- * =============
- * A consistent section header for grouping settings, form fields, etc.
- * Uses an eyebrow-style small-caps title above the content.
- *
- * Props:
- *   title     string  (required)
- *   icon      string  (Ionicon name) — optional
- *   subtitle  string  — optional supporting text below the title
- */
-
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';

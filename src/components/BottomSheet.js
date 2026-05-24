@@ -1,38 +1,3 @@
-/**
- * BottomSheet
- * ===========
- * A custom bottom sheet with spring-physics entrance/exit.
- *
- * Why not the `@gorhom/bottom-sheet` library?
- *   It's excellent but it's another 100KB dependency and the project already
- *   has react-native-reanimated + gesture-handler. This component does 95% of
- *   what we need (slide up, tap-to-dismiss, drag-handle indicator) in ~150
- *   lines and no new deps.
- *
- * Behavior:
- *   - Slides up from the bottom with a spring (or instantly if reducedMotion)
- *   - Backdrop fades to 48% black
- *   - Tapping the backdrop closes it
- *   - Draggable down to dismiss (threshold: 120px or fling velocity)
- *   - Max height: 85% of the screen
- *   - Drag-handle bar at the top for affordance
- *
- * Props:
- *   visible         boolean
- *   onClose         function
- *   height          number | 'auto' (default 'auto' — content-sized up to 85%)
- *   title           string — optional, renders a header with close button
- *   children        ReactNode
- *   scrollable      boolean (default false) — wraps children in ScrollView
- *   blocking        boolean (default true) — tap-backdrop-to-close toggle
- *   footer          ReactNode — sticky footer (action buttons etc.)
- *
- * Accessibility:
- *   - Modal with accessibilityViewIsModal
- *   - announce() called on open/close via the close/open effects
- *   - Backdrop has accessible=false so the native reader skips it
- */
-
 import React, { useEffect } from 'react';
 import {
   View, Text, StyleSheet, Modal, Dimensions, Pressable,
@@ -50,6 +15,7 @@ import AnimatedPressable from './AnimatedPressable';
 import { useAccessibility } from '../context/AccessibilityContext';
 import GlassCard from './GlassCard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import useKeyboardHeight from '../hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 const DISMISS_THRESHOLD = 120;
@@ -64,19 +30,31 @@ export default function BottomSheet({
   scrollable = false,
   blocking = true,
   footer,
+  avoidKeyboard = false,
 }) {
   const { theme, prefersReducedMotion, announce } = useAccessibility();
   const insets = useSafeAreaInsets();
+  const { height: kbHeight } = useKeyboardHeight();
 
-  // Start with the sheet off-screen
   const translateY = useSharedValue(SCREEN_H);
   const backdropOpacity = useSharedValue(0);
   const isExpanded = useSharedValue(false);
   const maxAnimHeight = useSharedValue(SCREEN_H * 0.85);
+  // docks sheet bottom above keyboard when avoidKeyboard is on
+  const kbLift = useSharedValue(0);
+
+  useEffect(() => {
+    if (!avoidKeyboard) { kbLift.value = 0; return; }
+    const target = kbHeight > 0 ? Math.max(0, kbHeight - insets.bottom) : 0;
+    if (prefersReducedMotion) {
+      kbLift.value = target;
+    } else {
+      kbLift.value = withTiming(target, { duration: 220 });
+    }
+  }, [kbHeight, avoidKeyboard, prefersReducedMotion, insets.bottom]);
 
   useEffect(() => {
     if (visible) {
-      // Open animation
       if (prefersReducedMotion) {
         translateY.value = 0;
         backdropOpacity.value = 1;
@@ -89,7 +67,7 @@ export default function BottomSheet({
       isExpanded.value = false;
       if (title) announce(title);
     } else {
-      // Close animation — handled by Modal unmount, just reset for next open
+      // reset for next open; modal handles the close visual
       translateY.value = SCREEN_H;
       backdropOpacity.value = 0;
       isExpanded.value = false;
@@ -101,7 +79,7 @@ export default function BottomSheet({
       onClose();
       return;
     }
-    // Animate down then actually unmount via onClose()
+    // animate down then unmount via onClose
     translateY.value = withTiming(SCREEN_H, { duration: 200 }, (finished) => {
       if (finished) runOnJS(onClose)();
     });
@@ -144,7 +122,7 @@ export default function BottomSheet({
           }
           backdropOpacity.value = 1;
         } else {
-          // Dragging down from 85% to close
+          // dragging down from 85% to close
           translateY.value = e.translationY;
           backdropOpacity.value = Math.max(0, 1 - e.translationY / 400);
         }
@@ -152,7 +130,6 @@ export default function BottomSheet({
     })
     .onEnd((e) => {
       if (isExpanded.value) {
-        // Check if we should close entirely
         const effectiveTranslation = e.translationY - (SCREEN_H * 0.15);
         if (effectiveTranslation > DISMISS_THRESHOLD || (e.velocityY > DISMISS_VELOCITY && e.translationY > 0)) {
            isExpanded.value = false;
@@ -160,12 +137,11 @@ export default function BottomSheet({
              if (finished) runOnJS(onClose)();
            });
            backdropOpacity.value = withTiming(0, { duration: 200 });
-        } else if (e.translationY > SCREEN_H * 0.08) { // A lighter threshold to return to 85%
+        } else if (e.translationY > SCREEN_H * 0.08) {
            isExpanded.value = false;
            translateY.value = withSpring(0, theme.motion.spring.snappy);
            maxAnimHeight.value = withSpring(SCREEN_H * 0.85, theme.motion.spring.snappy);
         } else {
-           // Snap back to 100%
            translateY.value = withSpring(0, theme.motion.spring.snappy);
            maxAnimHeight.value = withSpring(SCREEN_H, theme.motion.spring.snappy);
         }
@@ -175,12 +151,11 @@ export default function BottomSheet({
              if (finished) runOnJS(onClose)();
            });
            backdropOpacity.value = withTiming(0, { duration: 200 });
-        } else if (e.translationY < -SCREEN_H * 0.05) { // Threshold to expand
+        } else if (e.translationY < -SCREEN_H * 0.05) {
            isExpanded.value = true;
            translateY.value = withSpring(0, theme.motion.spring.snappy);
            maxAnimHeight.value = withSpring(SCREEN_H, theme.motion.spring.snappy);
         } else {
-           // Snap back to 85%
            translateY.value = withSpring(0, theme.motion.spring.snappy);
            maxAnimHeight.value = withSpring(SCREEN_H * 0.85, theme.motion.spring.snappy);
            backdropOpacity.value = withTiming(1, { duration: 180 });
@@ -196,15 +171,12 @@ export default function BottomSheet({
     let currentHeight = height === 'auto' ? undefined : Math.min(height, SCREEN_H * 0.85);
 
     return {
-      transform: [{ translateY: translateY.value }],
+      transform: [{ translateY: translateY.value - kbLift.value }],
       maxHeight: maxAnimHeight.value,
-      // If they used a fixed height, animate it towards SCREEN_H smoothly when expanded
       ...(height !== 'auto' ? { height: isExpanded.value ? maxAnimHeight.value : currentHeight } : {})
     };
   });
 
-  // We explicitly use standard views/scrollviews. The parent GestureDetector
-  // naturally grabs dragging on the sheet surface. 
   const Content = scrollable ? RNGHScrollView : View;
   const contentProps = scrollable
     ? { showsVerticalScrollIndicator: false, keyboardShouldPersistTaps: 'handled' }
@@ -215,12 +187,11 @@ export default function BottomSheet({
       visible={visible}
       transparent
       animationType="none"
-      onRequestClose={handleClose}     // Android hardware back button
+      onRequestClose={handleClose}
       statusBarTranslucent
     >
       <GestureHandlerRootView style={{ flex: 1 }}>
         <View style={styles.root}>
-        {/* Backdrop — plain Pressable (no scale animation on a full-screen element) */}
         <Pressable
           accessibilityLabel="Close"
           accessibilityHint="Dismisses the panel"
@@ -237,17 +208,12 @@ export default function BottomSheet({
           />
         </Pressable>
 
-        {/* Sheet */}
         <GestureDetector gesture={panGesture}>
             <Animated.View
             style={[
               styles.sheetShadow,
               sheetStyle,
-              // Shadow lives on THIS layer only — outer, no clipping. That's
-              // the fix for the "dim patches bleeding onto the sheet body"
-              // bug. Previously the shadow was on the ThemeCard inside a
-              // clipping wrapper, and Android rendered it inside the
-              // children's bounds when the surface was translucent.
+              // shadow on outer layer only — inner clip would crop it
               {
                 shadowColor: '#000',
                 shadowOffset: { width: 0, height: -4 },
@@ -259,23 +225,18 @@ export default function BottomSheet({
             accessibilityViewIsModal
           >
             <View
-              // Inner clipping layer: holds the rounded top corners and clips
-              // the body content, but carries no shadow of its own.
               style={[
                 styles.sheetClip,
                 {
                   borderTopLeftRadius: theme.radii.xxl,
                   borderTopRightRadius: theme.radii.xxl,
-                  // In non-glass mode, this View IS the sheet surface.
-                  // In glass mode the GlassCard inside provides the blur
-                  // so we don't paint a bg here (would cover the blur).
+                  // glass mode lets GlassCard provide the bg blur
                   backgroundColor: theme.glassUI ? 'transparent' : theme.color.surfaceElevated,
                   paddingBottom: Math.max(0, insets.bottom),
                 },
               ]}
             >
               {theme.glassUI ? (
-                // Glass mode — real blur, nothing covering it.
                 <GlassCard
                   intensity="heavy"
                   borderless
@@ -297,7 +258,6 @@ export default function BottomSheet({
                   </SheetBody>
                 </GlassCard>
               ) : (
-                // Solid mode — content sits directly on the opaque bg.
                 <SheetBody
                   title={title}
                   handleClose={handleClose}
@@ -311,14 +271,10 @@ export default function BottomSheet({
                 </SheetBody>
               )}
             </View>
-            
-            {/* 
-              Extension view: If the user drags the sheet *upwards* (negative translateY), 
-              the bottom of the sheet pulls up from the bottom of the screen. 
-              This absolute block covers that empty space securely into the void. 
-            */}
+
+            {/* covers the gap when sheet drags upward past resting position */}
             <View style={[
-              styles.extensionBlock, 
+              styles.extensionBlock,
               { backgroundColor: theme.glassUI ? 'transparent' : theme.color.surfaceElevated }
             ]}>
               {theme.glassUI && (
@@ -338,19 +294,14 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'flex-end',
   },
-  // Outer wrapper — carries ONLY the shadow. No overflow:hidden here, because
-  // that would clip the shadow we just defined. Width is full so transforms
-  // happen over the full sheet area.
+  // outer carries the shadow; no overflow:hidden so it isn't clipped
   sheetShadow: {
     width: '100%',
   },
-  // Inner wrapper — carries the rounded top corners and clips content. No
-  // shadow here (the outer handles it). Background is painted by a separate
-  // absoluteFill layer so the blur can sit on top of an opaque base.
+  // inner clips content and carries the top corner radius
   sheetClip: {
     overflow: 'hidden',
   },
-  // Covers the gap created if the sheet is forcefully dragged upward
   extensionBlock: {
     position: 'absolute',
     top: '100%',
@@ -386,20 +337,13 @@ const styles = StyleSheet.create({
   },
 });
 
-// ══════════════════════════════════════════════════════════════════════
-// SheetBody — shared body layout. Used inside either a GlassCard (glass
-// mode) or directly on the opaque base (solid mode). Factored out so the
-// two code paths don't duplicate the header/body/footer structure.
-// ══════════════════════════════════════════════════════════════════════
 function SheetBody({ title, handleClose, scrollable, Content, contentProps, footer, theme, children }) {
   return (
     <>
-      {/* Drag handle */}
       <View style={styles.handleArea}>
         <View style={[styles.handle, { backgroundColor: theme.color.borderStrong }]} />
       </View>
 
-      {/* Optional header */}
       {title ? (
         <View style={[styles.header, { borderBottomColor: theme.color.divider }]}>
           <Text
@@ -425,7 +369,6 @@ function SheetBody({ title, handleClose, scrollable, Content, contentProps, foot
         </View>
       ) : null}
 
-      {/* Body */}
       <Content
         style={styles.body}
         contentContainerStyle={scrollable ? { paddingBottom: theme.spacing.xxl } : undefined}
@@ -434,7 +377,6 @@ function SheetBody({ title, handleClose, scrollable, Content, contentProps, foot
         {children}
       </Content>
 
-      {/* Optional sticky footer */}
       {footer ? (
         <View style={[styles.footer, { borderTopColor: theme.color.divider }]}>
           {footer}

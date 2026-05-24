@@ -1,26 +1,4 @@
-/**
- * Chip
- * ====
- * A rounded pill-shaped toggle. Used in filter sheets, category selectors,
- * and as read-only tags (for accessibility features on a location).
- *
- * Two modes:
- *   - Interactive (pass onPress): renders as AnimatedPressable with selected state
- *   - Read-only  (no onPress):    renders as a plain View with 'text' role
- *
- * Props:
- *   label       string
- *   icon        string (Ionicon name) — optional
- *   iconColor   string — overrides default tinting
- *   selected    boolean
- *   onPress     function | undefined  (omit to make read-only)
- *   tone        'default' | 'success' | 'warning' | 'danger' | 'brand'
- *   size        'sm' | 'md' (default 'md')
- *
- * Example:
- *   <Chip label="Wheelchair ramp" icon="accessibility"
- *         selected={isOn} onPress={toggle} />
- */
+// omit onPress to render as a static tag instead of a toggle
 
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
@@ -41,7 +19,6 @@ export default function Chip({
 }) {
   const { theme, scale } = useAccessibility();
 
-  // Tone → {bg, fg, border}
   const toneStyles = getToneStyles(theme, tone, selected);
 
   const padH = size === 'sm' ? theme.spacing.md : theme.spacing.lg;
@@ -83,7 +60,6 @@ export default function Chip({
     </View>
   );
 
-  // Read-only chip (no press handler) — static tag
   if (!onPress) {
     return (
       <View accessible accessibilityRole="text" accessibilityLabel={label}>
@@ -105,7 +81,6 @@ export default function Chip({
   );
 }
 
-// Get background/foreground colors for each tone + state
 function getToneStyles(theme, tone, selected) {
   const c = theme.color;
   if (selected) {
@@ -117,7 +92,6 @@ function getToneStyles(theme, tone, selected) {
       default:         return { bg: c.brand,     fg: c.textOnBrand, border: c.brand };
     }
   }
-  // Unselected
   switch (tone) {
     case 'success':  return { bg: c.successBg, fg: c.success, border: 'transparent' };
     case 'warning':  return { bg: c.warningBg, fg: c.warning, border: 'transparent' };

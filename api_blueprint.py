@@ -1,54 +1,10 @@
-"""
-JOAccess Mobile API Blueprint (corrected)
-==========================================
-Drop this file into your Flask project root (same level as app.py).
-Then in app.py, add these three lines after creating the Flask app:
-
-    from api_blueprint import mobile_api, jwt
-    jwt.init_app(app)
-    app.register_blueprint(mobile_api, url_prefix='/api/v1')
-
-Also add flask-jwt-extended to your requirements.txt and install it:
-    pip install flask-jwt-extended
-
-All existing web routes remain untouched. The mobile app talks exclusively
-to /api/v1/* endpoints with JWT Bearer tokens for authentication.
-
-Fixes in this revision (vs. the original Phase 1 file):
--------------------------------------------------------
- 1. JWT identity is now always a string (flask-jwt-extended 4.6+ requires this).
-    get_jwt_identity() is wrapped so callers still receive an int.
- 2. SQLAlchemy Query.get() / get_or_404() replaced with db.session.get() +
-    explicit abort(404) — SQLAlchemy 2.0 compliance.
- 3. New /health endpoint for the mobile app's network probe.
- 4. json.loads() on stored JSON columns is wrapped in try/except so a
-    malformed DB value can't 500 the login endpoint.
- 5. ILIKE wildcard characters in user input are escaped so ?category=%
-    doesn't return the entire table.
- 6. Rating validation accepts int-like values and rejects booleans.
- 7. Photo uploads capped at 5MB each and 10 per request.
- 8. Uploaded filenames include a UUID slice so simultaneous uploads
-    never collide on disk.
- 9. Delete-location now deletes DB rows first, then removes files; file
-    errors no longer leave orphaned DB state.
-10. Server-side timestamps use datetime.utcnow() for stable filenames
-    regardless of server timezone.
-11. accessibility_settings update wrapped in try/except so unserializable
-    data can't poison the session.
-12. /my-locations now returns creator/creator_type for API symmetry.
-13. Chatbot keyword matching stays (Phase 2 replaces it with the LLM).
-14. All json.loads() calls on request-side data are wrapped defensively.
-
-Plus: consistent use of db.session.rollback() in broad except blocks to
-prevent hanging transactions.
-"""
-
 from flask import Blueprint, request, jsonify, current_app, abort
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
     jwt_required, get_jwt_identity, get_jwt
 )
 from flask_bcrypt import Bcrypt
+from sqlalchemy.orm import selectinload
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 from functools import wraps
@@ -61,30 +17,18 @@ mobile_api = Blueprint('mobile_api', __name__)
 jwt = JWTManager()
 bcrypt = Bcrypt()
 
-# ─────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────
 VALID_FEATURES = [
     'wheelchair_ramp', 'accessible_restroom', 'braille_signage',
     'accessible_parking', 'elevator', 'audio_assistance',
     'wide_doorways', 'automatic_doors'
 ]
 
-MAX_PHOTO_BYTES = 5 * 1024 * 1024           # 5MB per photo
-MAX_PHOTOS_PER_LOCATION = 10                # cap per request
+MAX_PHOTO_BYTES = 5 * 1024 * 1024
+MAX_PHOTOS_PER_LOCATION = 10
 
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
 def _current_user_id():
-    """
-    Return the current user's id as an int.
-
-    flask-jwt-extended 4.6+ requires the identity claim to be a string.
-    We store ids as strings in the token and convert back here so
-    SQLAlchemy lookups (which expect ints for integer PKs) still work.
-    """
+    """returns the jwt identity as int. flask-jwt-extended 4.6+ requires a string identity."""
     raw = get_jwt_identity()
     if raw is None:
         return None
@@ -95,8 +39,8 @@ def _current_user_id():
 
 
 def get_current_user():
-    """Retrieve the User object for the currently authenticated JWT identity."""
-    from app import User, db
+    from models import User
+    from extensions import db
     user_id = _current_user_id()
     if user_id is None:
         return None
@@ -104,12 +48,7 @@ def get_current_user():
 
 
 def _safe_json_loads(value, default=None):
-    """
-    json.loads() that never raises. Returns `default` on any error.
-
-    Used for JSON columns in the DB (accessibility_settings) and for
-    JSON strings embedded in form-data request bodies.
-    """
+    """json.loads() that never raises. returns default on any error."""
     if value is None or value == '':
         return default
     try:
@@ -119,20 +58,14 @@ def _safe_json_loads(value, default=None):
 
 
 def _escape_like(s):
-    """
-    Escape SQL LIKE wildcards (%, _, backslash) so user input is treated
-    as a literal substring instead of a pattern.
-    """
+    """escape SQL LIKE wildcards so user input is treated as a literal substring."""
     if not s:
         return ''
     return s.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
 
 
 def _generate_unique_filename(original):
-    """
-    Produce a filesystem-safe filename that won't collide with concurrent
-    uploads. Format: YYYYMMDD_HHMMSS_<8hexchars>_<sanitized>.ext
-    """
+    """returns a filesystem-safe filename: YYYYMMDD_HHMMSS_<8hex>_<sanitized>.ext"""
     safe = secure_filename(original) or 'upload.bin'
     stamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
     token = uuid.uuid4().hex[:8]
@@ -140,7 +73,6 @@ def _generate_unique_filename(original):
 
 
 def admin_required_api(fn):
-    """Decorator that requires both a valid JWT and admin privileges."""
     @wraps(fn)
     @jwt_required()
     def wrapper(*args, **kwargs):
@@ -151,12 +83,20 @@ def admin_required_api(fn):
     return wrapper
 
 
+def _location_query_options():
+    """eager-load every relationship _serialize_location touches.
+    avoids the N+1 problem that crashes gunicorn on slow staging connections."""
+    from models import Location, Review
+    return [
+        selectinload(Location.photos),
+        selectinload(Location.accessibility_features),
+        selectinload(Location.reviews).selectinload(Review.author),
+        selectinload(Location.creator),
+    ]
+
+
 def _serialize_location(loc, include_reviews=True):
-    """
-    Consistent dict representation of a Location for API responses.
-    Centralized here so /locations, /locations/:id, /my-locations all
-    return the same field set.
-    """
+    """relationships must be eager-loaded first — use _location_query_options()."""
     features = [{
         'type':     f.feature_type,
         'available': f.available,
@@ -205,22 +145,15 @@ def _serialize_location(loc, include_reviews=True):
 
 
 def _save_base64_photos(photos_raw, location_id):
-    """
-    Save base64-encoded photos from a request payload.
-
-    Enforces size and count caps. Accepts either a list of dicts or a
-    JSON string (coming in via multipart/form-data).
-
-    Returns the number of photos successfully saved.
-    """
-    from app import Photo, db
+    """save base64-encoded photos. accepts a list of dicts or a JSON string."""
+    from models import Photo
+    from extensions import db
 
     if isinstance(photos_raw, str):
         photos_raw = _safe_json_loads(photos_raw, default=[])
     if not isinstance(photos_raw, list):
         return 0
 
-    # Enforce a hard cap regardless of what the client sends
     photos_raw = photos_raw[:MAX_PHOTOS_PER_LOCATION]
 
     saved = 0
@@ -233,10 +166,10 @@ def _save_base64_photos(photos_raw, location_id):
         try:
             img_bytes = base64.b64decode(photo_data['data'])
         except (ValueError, TypeError):
-            continue  # bad base64, skip silently
+            continue
 
         if len(img_bytes) > MAX_PHOTO_BYTES:
-            continue  # skip oversized
+            continue
 
         filename = _generate_unique_filename(photo_data['filename'])
         upload_folder = current_app.config['UPLOAD_FOLDER']
@@ -247,17 +180,51 @@ def _save_base64_photos(photos_raw, location_id):
             with open(filepath, 'wb') as f:
                 f.write(img_bytes)
         except OSError:
-            continue  # disk error, skip
+            continue
 
         db.session.add(Photo(location_id=location_id, filename=filename))
         saved += 1
 
     return saved
 
+def _remove_photos(removed_raw, location_id):
+    """hard-delete photos by filename, scoped to location_id.
+    deletes rows first — DB is authoritative; orphan files are cleanup-only."""
+    from models import Photo
+    from extensions import db
+    if isinstance(removed_raw, str):
+        removed_raw = _safe_json_loads(removed_raw, default=[])
+    if not isinstance(removed_raw, list):
+        return 0
+    filenames = [f for f in removed_raw if isinstance(f, str) and f]
+    if not filenames:
+        return 0
+    rows = Photo.query.filter(
+        Photo.location_id == location_id,
+        Photo.filename.in_(filenames),
+    ).all()
+    if not rows:
+        return 0
+    confirmed = [r.filename for r in rows]
+    for row in rows:
+        db.session.delete(row)
+    db.session.flush()
+    upload_folder = current_app.config['UPLOAD_FOLDER']
+    for filename in confirmed:
+        filepath = os.path.join(upload_folder, filename)
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except OSError as e:
+            current_app.logger.warning(
+                'Failed to delete photo file %s: %s', filename, e
+            )
+    return len(confirmed)
+
 
 def _save_multipart_photos(files_list, location_id):
-    """Save photo files from a multipart/form-data request."""
-    from app import Photo, db
+    from models import Photo
+    from extensions import db
 
     saved = 0
     files_list = files_list[:MAX_PHOTOS_PER_LOCATION]
@@ -266,7 +233,7 @@ def _save_multipart_photos(files_list, location_id):
         if not file or not file.filename:
             continue
 
-        # Size check — seek to end, tell, seek back
+        # size check via seek/tell
         file.seek(0, os.SEEK_END)
         size = file.tell()
         file.seek(0)
@@ -289,49 +256,21 @@ def _save_multipart_photos(files_list, location_id):
     return saved
 
 
-# ═════════════════════════════════════════════
-#  HEALTH
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/health', methods=['GET'])
 def api_health():
-    """
-    Lightweight health check used by the mobile app's network probe.
-
-    Returns:
-        200: { status: 'ok', timestamp: '2026-...' }
-    """
+    """health probe for the mobile app's network check."""
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.utcnow().isoformat(),
     }), 200
 
 
-# ═════════════════════════════════════════════
-#  AUTH ENDPOINTS
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/auth/signup', methods=['POST'])
 def api_signup():
-    """
-    Register a new user account.
-
-    Request JSON:
-    {
-        "username": "string (required)",
-        "email": "string (required)",
-        "password": "string (required, min 6 chars)",
-        "user_type": "individual | organization (required)",
-        "organization_name": "string (optional, required if user_type=organization)",
-        "disability": "string | null (optional)"
-    }
-
-    Returns:
-        201: { success, message, user: { id, username, email, user_type, is_admin } }
-        400: { error } on validation failure
-        409: { error } on duplicate email/username
-    """
-    from app import User, db, ADMIN_EMAILS
+    """register a new user. 201 on success, 409 on duplicate email/username."""
+    from models import User
+    from extensions import db
+    ADMIN_EMAILS = current_app.config.get('ADMIN_EMAILS', [])
 
     data = request.get_json(silent=True)
     if not data:
@@ -372,7 +311,6 @@ def api_signup():
             password=hashed_password,
             user_type=user_type,
             org_name=organization_name if user_type == 'organization' else None,
-
             disability=disability,
             is_admin=is_admin,
         )
@@ -397,16 +335,8 @@ def api_signup():
 
 @mobile_api.route('/auth/login', methods=['POST'])
 def api_login():
-    """
-    Authenticate and receive JWT tokens.
-
-    Request JSON: { "email": str, "password": str }
-
-    Returns:
-        200: { access_token, refresh_token, user: {...} }
-        401: { error } on invalid credentials
-    """
-    from app import User
+    """authenticate and return JWT tokens. 401 on invalid credentials."""
+    from models import User
 
     data = request.get_json(silent=True)
     if not data:
@@ -419,9 +349,8 @@ def api_login():
     if not user or not bcrypt.check_password_hash(user.password, password):
         return jsonify({'error': 'Invalid email or password'}), 401
 
-    # IMPORTANT: identity MUST be a string under flask-jwt-extended >= 4.6.
-    # We also stash is_admin in additional_claims so the refresh endpoint
-    # can preserve it without another DB lookup.
+    # identity MUST be a string under flask-jwt-extended >= 4.6.
+    # is_admin stashed in claims so refresh can preserve it without a DB lookup.
     access_token = create_access_token(
         identity=str(user.id),
         additional_claims={'is_admin': user.is_admin},
@@ -448,16 +377,9 @@ def api_login():
 @mobile_api.route('/auth/refresh', methods=['POST'])
 @jwt_required(refresh=True)
 def api_refresh():
-    """
-    Refresh an expired access token using a valid refresh token.
-
-    Headers: Authorization: Bearer <refresh_token>
-
-    Returns:
-        200: { access_token }
-        404: { error } if the user has been deleted since the token was issued
-    """
-    from app import User, db
+    """refresh an expired access token using a valid refresh token."""
+    from models import User
+    from extensions import db
 
     user_id = _current_user_id()
     if user_id is None:
@@ -477,12 +399,6 @@ def api_refresh():
 @mobile_api.route('/auth/me', methods=['GET'])
 @jwt_required()
 def api_me():
-    """
-    Get the currently authenticated user's profile.
-
-    Returns:
-        200: { user: {...} }
-    """
     user = get_current_user()
     if not user:
         return jsonify({'error': 'User not found'}), 404
@@ -504,31 +420,16 @@ def api_me():
     }), 200
 
 
-# ═════════════════════════════════════════════
-#  LOCATIONS ENDPOINTS
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/locations', methods=['GET'])
 def api_get_locations():
-    """
-    Get all locations with optional filtering.
+    """list locations. query: category, feature, verified, search."""
+    from models import Location, Review
 
-    Query params:
-        category (string): Filter by category name (substring match)
-        feature (string):  Filter to locations with this accessibility feature
-        verified (bool):   Filter verified only (true/false)
-        search (string):   Search by name/name_ar/address
-
-    Returns:
-        200: [ { ...location dict... } ]
-    """
-    from app import Location
-
-    query = Location.query
+    query = Location.query.options(*_location_query_options())
 
     category = request.args.get('category')
     if category:
-        # Escape wildcards so ?category=% doesn't return everything
+        # escape wildcards so ?category=% doesn't return everything
         pattern = f'%{_escape_like(category)}%'
         query = query.filter(Location.category.ilike(pattern, escape='\\'))
 
@@ -548,8 +449,7 @@ def api_get_locations():
 
     locations = query.order_by(Location.created_at.desc()).all()
 
-    # Post-filter by feature (requires joining or iterating — we iterate
-    # because the feature list per location is always tiny)
+    # iterate rather than join — feature lists are tiny and already eager-loaded
     feature_filter = request.args.get('feature')
     result = []
     for loc in locations:
@@ -567,10 +467,16 @@ def api_get_locations():
 
 @mobile_api.route('/locations/<int:location_id>', methods=['GET'])
 def api_get_location(location_id):
-    """Get a single location by ID with full details."""
-    from app import Location, db
+    from models import Location, Review
+    from extensions import db
 
-    loc = db.session.get(Location, location_id)
+    # session.get() doesn't support .options(); use query() to attach eager-load
+    loc = (
+        db.session.query(Location)
+        .options(*_location_query_options())
+        .filter(Location.id == location_id)
+        .first()
+    )
     if not loc:
         abort(404)
 
@@ -580,36 +486,17 @@ def api_get_location(location_id):
 @mobile_api.route('/locations', methods=['POST'])
 @jwt_required()
 def api_create_location():
-    """
-    Create a new location (authenticated users only).
-
-    Accepts either JSON or multipart/form-data (for photo uploads).
-
-    JSON fields:
-    {
-        "name": str (required),
-        "name_ar": str (required),
-        "description": str,
-        "description_ar": str,
-        "category": str (required),
-        "latitude": float (required),
-        "longitude": float (required),
-        "address": str,
-        "address_ar": str,
-        "accessibility_features": ["wheelchair_ramp", ...],
-        "photos_base64": [{"filename": "img.jpg", "data": "base64..."}]
-    }
-    """
-    from app import Location, AccessibilityFeature, db
+    """create a location. accepts JSON or multipart/form-data."""
+    from models import Location, AccessibilityFeature
+    from extensions import db
 
     user = get_current_user()
     if not user:
         return jsonify({'error': 'Authentication required'}), 401
 
-    # Parse body from either JSON or multipart
     if request.content_type and 'multipart/form-data' in request.content_type:
         data = request.form.to_dict()
-        # Form values come as strings; decode any JSON-encoded fields
+        # form values are strings; decode JSON-encoded fields
         if 'accessibility_features' in data:
             data['accessibility_features'] = _safe_json_loads(
                 data['accessibility_features'], default=[]
@@ -650,9 +537,8 @@ def api_create_location():
             is_verified=False,
         )
         db.session.add(location)
-        db.session.flush()  # assign location.id without committing yet
+        db.session.flush()  # assigns location.id before committing
 
-        # Accessibility features
         features_list = data.get('accessibility_features', []) or []
         if isinstance(features_list, str):
             features_list = _safe_json_loads(features_list, default=[])
@@ -665,11 +551,11 @@ def api_create_location():
                     available=True,
                 ))
 
-        # Photo uploads (multipart)
         if request.files:
             _save_multipart_photos(request.files.getlist('photos'), location.id)
 
-        # Photo uploads (base64 from JSON)
+        # remove before adding so the per-location cap isn't fought over
+        _remove_photos(data.get('removed_photos', []), location.id)
         _save_base64_photos(data.get('photos_base64', []), location.id)
 
         db.session.commit()
@@ -693,8 +579,9 @@ def api_create_location():
 @mobile_api.route('/locations/<int:location_id>', methods=['PUT'])
 @jwt_required()
 def api_update_location(location_id):
-    """Update an existing location (owner or admin only)."""
-    from app import Location, AccessibilityFeature, db
+    """update a location (owner or admin only)."""
+    from models import Location, AccessibilityFeature
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -732,7 +619,7 @@ def api_update_location(location_id):
             except (TypeError, ValueError):
                 return jsonify({'error': 'Invalid longitude'}), 400
 
-        # Replace accessibility features wholesale
+        # replace features wholesale
         if 'accessibility_features' in data:
             AccessibilityFeature.query.filter_by(location_id=location.id).delete()
             features_list = data['accessibility_features']
@@ -749,7 +636,9 @@ def api_update_location(location_id):
                         available=True,
                     ))
 
-        # Append new photos (existing ones preserved)
+
+        # remove before adding so the per-location cap isn't fought over
+        _remove_photos(data.get('removed_photos', []), location.id)
         _save_base64_photos(data.get('photos_base64', []), location.id)
 
         db.session.commit()
@@ -773,15 +662,10 @@ def api_update_location(location_id):
 @mobile_api.route('/locations/<int:location_id>', methods=['DELETE'])
 @jwt_required()
 def api_delete_location(location_id):
-    """
-    Delete a location (owner or admin only).
-
-    Important: we delete the DB row FIRST, then the files. This keeps the
-    database authoritative — if file deletion fails the DB is still
-    consistent (the row is gone, orphan files are a cleanup job, not a
-    correctness issue).
-    """
-    from app import Location, db
+    """delete a location (owner or admin only). DB row goes first; orphan
+    files are a cleanup job, not a correctness issue."""
+    from models import Location
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -794,7 +678,7 @@ def api_delete_location(location_id):
     if location.user_id != user.id and not user.is_admin:
         return jsonify({'error': 'You do not have permission to delete this location'}), 403
 
-    # Collect filenames BEFORE deleting the row (so the relationship resolves)
+    # collect filenames before deletion so the relationship still resolves
     photo_files = [p.filename for p in location.photos]
 
     try:
@@ -804,7 +688,7 @@ def api_delete_location(location_id):
         db.session.rollback()
         return jsonify({'error': 'Failed to delete location'}), 500
 
-    # Best-effort file cleanup — errors logged but don't fail the request
+    # best-effort file cleanup
     upload_folder = current_app.config['UPLOAD_FOLDER']
     for filename in photo_files:
         filepath = os.path.join(upload_folder, filename)
@@ -819,23 +703,12 @@ def api_delete_location(location_id):
     return jsonify({'success': True, 'message': 'Location deleted successfully'}), 200
 
 
-# ═════════════════════════════════════════════
-#  REVIEWS ENDPOINTS
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/locations/<int:location_id>/reviews', methods=['POST'])
 @jwt_required()
 def api_add_review(location_id):
-    """
-    Add a review to a location.
-
-    Request JSON:
-    {
-        "rating": int (1-5, required),
-        "comment": str (optional)
-    }
-    """
-    from app import Location, Review, db
+    """add a review (rating 1-5, optional comment)."""
+    from models import Location, Review
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -848,9 +721,8 @@ def api_add_review(location_id):
     if not data:
         return jsonify({'error': 'Request body required'}), 400
 
-    # Rating validation — accept numeric types but reject booleans.
-    # isinstance(True, int) is True in Python, which would otherwise
-    # let {"rating": true} through as a 1-star review.
+    # reject booleans — isinstance(True, int) is True in python,
+    # which would otherwise let {"rating": true} through as 1-star.
     raw_rating = data.get('rating')
     if isinstance(raw_rating, bool) or raw_rating is None:
         return jsonify({'error': 'Rating must be a number between 1 and 5'}), 400
@@ -890,11 +762,9 @@ def api_add_review(location_id):
 @mobile_api.route('/reviews/<int:review_id>', methods=['DELETE'])
 @jwt_required()
 def api_delete_review(review_id):
-    """
-    Delete a review. Owner can delete their own; admin can delete any
-    but must provide a reason (which gets logged).
-    """
-    from app import Review, db
+    """owner can delete own review; admin can delete any but must supply a reason."""
+    from models import Review
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -929,19 +799,12 @@ def api_delete_review(review_id):
         return jsonify({'error': 'Failed to delete review'}), 500
 
 
-# ═════════════════════════════════════════════
-#  REPORTS ENDPOINTS
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/locations/<int:location_id>/report', methods=['POST'])
 @jwt_required()
 def api_report_location(location_id):
-    """
-    Report a location for issues.
-
-    Request JSON: { "reason": str (required), "description": str (optional) }
-    """
-    from app import Location, Report, db
+    """report a location. reason required, description optional."""
+    from models import Location, Report
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -967,113 +830,421 @@ def api_report_location(location_id):
         )
         db.session.add(report)
         db.session.commit()
-    except Exception:
+    except Exception as e:
         db.session.rollback()
-        return jsonify({'error': 'Failed to submit report'}), 500
+        return jsonify({'error': f'Failed to submit report: {str(e)}'}), 500
 
     return jsonify({'success': True, 'message': 'Report submitted'}), 201
 
 
-# ═════════════════════════════════════════════
-#  CHATBOT ENDPOINT
-# ═════════════════════════════════════════════
+import math
+import re
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """great-circle distance in km between two (lat, lon) points."""
+    R = 6371.0
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    Δφ = math.radians(lat2 - lat1)
+    Δλ = math.radians(lon2 - lon1)
+    a = math.sin(Δφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(Δλ / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _fuzzy_name_match(name, text, min_matches=3):
+    """true if enough distinctive words from `name` appear in `text`.
+    fuzzy because the LLM paraphrases — exact substring match misses valid mentions.
+    works for both arabic and english."""
+    if not name or not text:
+        return False
+    name_lower = name.lower()
+    text_lower = text.lower()
+    # split on whitespace, arabic/latin comma, period; drop words <=2 chars
+    words = [w for w in re.split(r'[\s،,\.]+', name_lower) if len(w) > 2]
+    if not words:
+        return False
+    matches  = sum(1 for w in words if w in text_lower)
+    required = min(min_matches, len(words))
+    return matches >= required
+
+
+def _build_location_context(user_lat=None, user_lon=None, limit=30):
+    """returns (text_context, structured). sorts by distance if GPS provided, else by rating."""
+    from models import Location
+
+    try:
+        locations = (
+            Location.query
+            .options(*_location_query_options())
+            .all()
+        )
+    except Exception:
+        return "No location data available at the moment.", []
+
+    if not locations:
+        return "There are currently no locations listed in the app.", []
+
+    rows = []
+    for loc in locations:
+        avg = (
+            round(sum(r.rating for r in loc.reviews) / len(loc.reviews), 1)
+            if loc.reviews else None
+        )
+        rating_str = f"{avg}⭐ ({len(loc.reviews)} reviews)" if avg else "no ratings yet"
+
+        dist_str = ""
+        dist_km  = None
+        if user_lat is not None and user_lon is not None:
+            dist_km  = _haversine_km(user_lat, user_lon, loc.latitude, loc.longitude)
+            dist_str = f" | {dist_km:.1f} km away"
+
+        available_features = [
+            f.feature_type.replace('_', ' ')
+            for f in loc.accessibility_features
+            if f.available
+        ]
+        features_str = (
+            ', '.join(available_features)
+            if available_features
+            else 'no accessibility features listed'
+        )
+
+        rows.append({
+            'text': (
+                f"• {loc.name} ({loc.name_ar}) | {loc.category} | "
+                f"{loc.address or 'address not listed'} | "
+                f"Rating: {rating_str}{dist_str} | "
+                f"Verified: {'yes' if loc.is_verified else 'no'} | "
+                f"Features: {features_str}"
+            ),
+            'dist_km': dist_km,
+            'avg':     avg or 0,
+            'loc':     loc,
+        })
+
+    if user_lat is not None:
+        rows.sort(key=lambda r: r['dist_km'] if r['dist_km'] is not None else 9999)
+    else:
+        rows.sort(key=lambda r: r['avg'], reverse=True)
+
+    top = rows[:limit]
+
+    text_context = '\n'.join(r['text'] for r in top)
+
+    structured = []
+    for r in top:
+        loc = r['loc']
+        structured.append({
+            'id':           loc.id,
+            'name':         loc.name,
+            'name_ar':      loc.name_ar,
+            'category':     loc.category,
+            'address':      loc.address or '',
+            'address_ar':   loc.address_ar or '',
+            'latitude':     loc.latitude,
+            'longitude':    loc.longitude,
+            'avg_rating':   round(r['avg'], 1),
+            'review_count': len(loc.reviews),
+            'is_verified':  loc.is_verified,
+            'distance_km':  round(r['dist_km'], 2) if r['dist_km'] is not None else None,
+            'features':     [
+                f.feature_type
+                for f in loc.accessibility_features
+                if f.available
+            ],
+            'photo': loc.photos[0].filename if loc.photos else None,
+        })
+
+    return text_context, structured
+
 
 @mobile_api.route('/chatbot', methods=['POST'])
+@jwt_required()
 def api_chatbot():
-    """
-    Keyword-matching chatbot (Phase 2 replaces this with the LLM).
+    """accessibility assistant powered by Gemma 4 31B via OpenRouter.
+    GPS is used silently for distance sorting; never exposed to the model.
+    falls back to keyword matching if the LLM call fails."""
+    import requests as http_requests
 
-    Request JSON: { "message": str (required), "lang": "en" | "ar" }
-    Returns:     { "response": str, "suggestions": [str, ...] }
-    """
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
     data = request.get_json(silent=True)
     if not data:
         return jsonify({'error': 'Request body required'}), 400
 
-    message = (data.get('message') or '').lower().strip()
-    lang = data.get('lang', 'en')
+    message = (data.get('message') or '').strip()
+    lang    = data.get('lang', 'en')
 
-    responses_en = {
+    if not message:
+        return jsonify({'error': 'Message is required'}), 400
+
+    # GPS used only for distance sort; never passed to the LLM or returned
+    user_lat         = user_lon = None
+    location_enabled = bool(data.get('location_enabled', False))
+
+    try:
+        if data.get('lat') is not None and data.get('lng') is not None:
+            user_lat = float(data['lat'])
+            user_lon = float(data['lng'])
+    except (TypeError, ValueError):
+        pass
+
+    if user_lat is not None:
+        location_status = (
+            "The user has enabled location permissions and their position is known. "
+            "Distances to each location have been pre-calculated and are shown in the "
+            "location list below. You may reference distances naturally (e.g. 'only 0.3 km away') "
+            "but NEVER mention, repeat, or reference the raw coordinates themselves. "
+            "If the user asks where they are, look at the FIRST location in the list "
+            "(which is the closest one) and infer the user's area from its address field only. "
+            "For example if the closest location's address contains 'Irbid', say 'You seem to be near Irbid'. "
+            "Do NOT use your own knowledge of Jordan's geography to guess. "
+            "Do NOT mention any city or area that does not appear in the closest location's address. "
+            "Never state exact coordinates."
+        )
+    elif location_enabled:
+        location_status = (
+            "The user has enabled location permissions but a GPS fix has not been "
+            "obtained yet. Do not reference any distances or the user's position. "
+            "If they ask where they are or for the closest location, let them know "
+            "their position is still loading and to try again in a moment."
+        )
+    else:
+        location_status = (
+            "The user has NOT enabled location permissions for the JOAccess app. "
+            "If they ask anything that requires their location (closest place, distance, "
+            "where am I, etc.), tell them directly and clearly that you need location "
+            "access to answer that, and ask them to enable location permissions for "
+            "JOAccess in their device settings. Do not guess, approximate, or infer "
+            "their location under any circumstances."
+        )
+
+    disability_context = (
+        f"The user has indicated the following about their disability or accessibility needs: {user.disability}"
+        if user.disability and user.disability.strip()
+        else "The user has not specified any disability or accessibility needs — if relevant, ask them what kind of help or features they're looking for."
+    )
+
+    api_key = current_app.config.get('OPENROUTER_API_KEY', '')
+
+    if api_key:
+        location_context, all_locations_structured = _build_location_context(
+            user_lat, user_lon
+        )
+
+        has_location = user_lat is not None
+
+        system_prompt = f"""You are the JOAccess Assistant — a friendly, helpful guide built into the JOAccess app, which maps accessible locations across Jordan for people with disabilities.
+
+Your personality: warm, concise, and direct. You answer naturally like a knowledgeable local friend, not like a customer-service bot. Never repeat the same boilerplate line twice in the same conversation. Never say "I'm here to help you find accessible locations" more than once per session.
+
+CURRENT USER:
+- Name: {user.username}
+- {disability_context}
+
+LOCATION ACCESS STATUS:
+{location_status}
+
+IMPORTANT PRIVACY RULES:
+- NEVER mention, reveal, or reference raw GPS coordinates (lat/lon numbers) under any circumstances.
+- NEVER claim to know anything about the user beyond what is stated in CURRENT USER above.
+- If the user asks "what do you know about me?", respond with ONLY their name and their disability/accessibility info as listed above — nothing else.
+- Distances you see in the location list are pre-calculated by the server. You may quote them naturally but never explain how they were computed.
+
+Here is the live list of locations currently in the app (sorted {"by distance, closest first" if has_location else "by average rating"}):
+
+{location_context}
+
+Rules you MUST follow:
+1. Address the user by name ({user.username}) naturally — not in every message, just where it feels right.
+2. When a user asks about locations, ALWAYS reference specific places from the list above by name. Never give a vague "we have locations with X" response when real data exists.
+3. When recommending places, mention the name, category, distance (if available), rating, and which relevant accessibility features it has.
+4. If the user asks for the closest location, give the top 1–3 from the sorted list.
+5. If the user asks about a specific feature (e.g. wheelchair ramp), filter the list and only mention places that actually have it.
+6. Tailor your recommendations to the user's disability context when relevant — e.g. if they use a wheelchair, prioritise places with ramps and elevators without being asked.
+7. If no locations match what they asked for, say so honestly — don't make things up.
+8. Keep responses under 160 words.
+9. Respond in Arabic if the user writes in Arabic, English otherwise.
+10. At the end of every response include EXACTLY this line with 3–4 follow-up suggestions:
+SUGGESTIONS: ["suggestion1", "suggestion2", "suggestion3"]
+    Suggestions should be natural follow-up questions or app category names relevant to what was just discussed.
+11. Only mention a location by name if you are actively recommending it as a direct answer to what the user asked. Do not name locations as passing side-suggestions unless they genuinely match the request.
+
+Accessibility features you know about: wheelchair ramp, accessible restroom, braille signage, accessible parking, elevator, audio assistance, wide doorways, automatic doors.
+Location categories: Restaurants & Cafes, Shopping Malls, Supermarkets, Healthcare, Educational, Government Buildings, Religious Places, Transportation, Tourist Attractions, Beauty & Wellness, Parks, Entertainment, Hotels, Banks & ATMs, Sports & Fitness."""
+
+        try:
+            resp = http_requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type":  "application/json",
+                    "HTTP-Referer":  "https://joaccess.com",
+                    "X-Title":       "JOAccess",
+                },
+                json={
+                    "model":    "google/gemma-4-31b-it",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": message},
+                    ],
+                    "max_tokens":  400,
+                    "temperature": 0.65,
+                },
+                timeout=20,
+            )
+
+            if resp.ok:
+                raw_content = resp.json()['choices'][0]['message']['content'].strip()
+
+                suggestions   = []
+                response_text = raw_content
+
+                if 'SUGGESTIONS:' in raw_content:
+                    parts         = raw_content.split('SUGGESTIONS:', 1)
+                    response_text = parts[0].strip()
+                    try:
+                        suggestions = json.loads(parts[1].strip().split('\n')[0])
+                        if not isinstance(suggestions, list):
+                            suggestions = []
+                    except (ValueError, TypeError):
+                        suggestions = []
+
+                if not suggestions:
+                    suggestions = (
+                        ['Restaurants & Cafes', 'Healthcare', 'Shopping Malls', 'Parks']
+                        if lang == 'en'
+                        else ['مطاعم ومقاهي', 'رعاية صحية', 'مراكز تسوق', 'حدائق']
+                    )
+
+                # fuzzy match against both name and name_ar — the LLM paraphrases
+                locations_for_cards = [
+                    loc for loc in all_locations_structured
+                    if _fuzzy_name_match(loc['name'], response_text)
+                    or _fuzzy_name_match(loc['name_ar'], response_text)
+                ]
+
+                return jsonify({
+                    'response':    response_text,
+                    'suggestions': suggestions[:4],
+                    'locations':   locations_for_cards,
+                }), 200
+
+            current_app.logger.warning(
+                'OpenRouter returned %s: %s', resp.status_code, resp.text[:300]
+            )
+
+        except Exception as e:
+            current_app.logger.warning('OpenRouter chatbot call failed: %s', e)
+
+    # keyword fallback when no API key or the LLM call failed
+    msg_lower = message.lower()
+
+    keyword_responses_en = {
         'wheelchair': {
-            'response': 'I can help you find wheelchair-accessible locations! We have locations with wheelchair ramps, accessible entrances, and elevators. Would you like me to show you restaurants, malls, or other specific types of locations?',
-            'suggestions': ['Restaurants', 'Shopping Malls', 'Healthcare', 'Parks'],
+            'response':    'I can help you find wheelchair-accessible locations! We have locations with wheelchair ramps, accessible entrances, and elevators across Jordan.',
+            'suggestions': ['Restaurants & Cafes', 'Shopping Malls', 'Healthcare', 'Parks'],
+            'locations':   [],
         },
         'parking': {
-            'response': 'Looking for accessible parking? I can show you locations that have designated accessible parking spots. What type of place are you looking for?',
+            'response':    'Looking for accessible parking? I can show you locations with designated accessible parking spots.',
             'suggestions': ['Supermarkets', 'Shopping Malls', 'Government Buildings', 'Healthcare'],
+            'locations':   [],
         },
         'restroom': {
-            'response': 'I can help you find locations with accessible restrooms. These locations have properly equipped facilities for people with disabilities. What category interests you?',
+            'response':    'I can help you find locations with accessible restrooms properly equipped for people with disabilities.',
             'suggestions': ['Restaurants & Cafes', 'Shopping Malls', 'Tourist Attractions', 'Parks'],
+            'locations':   [],
         },
-        'visual': {
-            'response': 'For visual impairments, I recommend locations with braille signage and audio assistance. Would you like to see places in any specific category?',
+        'braille': {
+            'response':    'Looking for braille signage? I can show you locations with braille and audio assistance for visually impaired visitors.',
             'suggestions': ['Government Buildings', 'Healthcare', 'Educational', 'Transportation'],
+            'locations':   [],
+        },
+        'elevator': {
+            'response':    'I can help you find locations with working elevators for multi-floor accessibility.',
+            'suggestions': ['Shopping Malls', 'Healthcare', 'Government Buildings', 'Hotels'],
+            'locations':   [],
         },
         'restaurant': {
-            'response': 'Great choice! I can show you accessible restaurants and cafes in Jordan. Many have wheelchair access, accessible restrooms, and wide doorways. Would you like to see them on the map?',
-            'suggestions': ['Show on map', 'Filter by area', 'See reviews'],
+            'response':    'I can show you accessible restaurants and cafes in Jordan with wheelchair access, accessible restrooms, and wide doorways.',
+            'suggestions': ['Restaurants & Cafes', 'Shopping Malls', 'Healthcare', 'Parks'],
+            'locations':   [],
+        },
+        'hospital': {
+            'response':    'Looking for accessible healthcare? Jordan has many hospitals and clinics with full accessibility features.',
+            'suggestions': ['Healthcare', 'Government Buildings', 'Transportation', 'Parks'],
+            'locations':   [],
         },
         'help': {
-            'response': "I'm here to help you find accessible locations in Jordan! You can ask me about:\n• Wheelchair accessibility\n• Accessible parking\n• Restrooms\n• Braille signage\n• Audio assistance\n• Or any specific type of location",
-            'suggestions': ['Restaurants', 'Healthcare', 'Shopping', 'Transportation'],
+            'response':    "I'm here to help you find accessible locations in Jordan! Ask me about wheelchair access, parking, restrooms, braille signage, audio assistance, or any type of location.",
+            'suggestions': ['Restaurants & Cafes', 'Healthcare', 'Shopping Malls', 'Transportation'],
+            'locations':   [],
         },
     }
 
-    responses_ar = {
+    keyword_responses_ar = {
         'كرسي': {
-            'response': 'يمكنني مساعدتك في إيجاد أماكن يمكن الوصول إليها بكرسي متحرك! لدينا أماكن مع منحدرات ومداخل ومصاعد. هل تريد أن أريك مطاعم أو مراكز تسوق أو أنواع أخرى من الأماكن؟',
+            'response':    'يمكنني مساعدتك في إيجاد أماكن يمكن الوصول إليها بكرسي متحرك! لدينا أماكن مع منحدرات ومداخل ومصاعد في جميع أنحاء الأردن.',
             'suggestions': ['مطاعم ومقاهي', 'مراكز تسوق', 'رعاية صحية', 'حدائق'],
+            'locations':   [],
         },
         'موقف': {
-            'response': 'تبحث عن مواقف سيارات مخصصة؟ يمكنني أن أريك أماكن بها مواقف مخصصة لذوي الإعاقة. ما نوع المكان الذي تبحث عنه؟',
+            'response':    'تبحث عن مواقف سيارات مخصصة؟ يمكنني أن أريك أماكن بها مواقف مخصصة لذوي الإعاقة.',
             'suggestions': ['سوبرماركت', 'مراكز تسوق', 'مباني حكومية', 'رعاية صحية'],
+            'locations':   [],
         },
         'دورة مياه': {
-            'response': 'يمكنني مساعدتك في إيجاد أماكن بها دورات مياه مجهزة. هذه الأماكن لديها مرافق مناسبة لذوي الإعاقة. أي فئة تهمك؟',
+            'response':    'يمكنني مساعدتك في إيجاد أماكن بها دورات مياه مجهزة لذوي الإعاقة.',
             'suggestions': ['مطاعم ومقاهي', 'مراكز تسوق', 'مناطق سياحية', 'حدائق'],
+            'locations':   [],
         },
-        'بصر': {
-            'response': 'بالنسبة للإعاقات البصرية، أنصح بأماكن بها لافتات بطريقة برايل ومساعدة صوتية. هل تريد رؤية أماكن في فئة معينة؟',
+        'برايل': {
+            'response':    'تبحث عن لافتات برايل؟ يمكنني إظهار الأماكن التي تحتوي على لافتات برايل ومساعدة صوتية.',
             'suggestions': ['مباني حكومية', 'رعاية صحية', 'تعليمية', 'مواصلات'],
+            'locations':   [],
+        },
+        'مصعد': {
+            'response':    'يمكنني مساعدتك في إيجاد أماكن بها مصاعد تعمل بشكل جيد.',
+            'suggestions': ['مراكز تسوق', 'رعاية صحية', 'مباني حكومية', 'فنادق'],
+            'locations':   [],
         },
         'مطعم': {
-            'response': 'اختيار رائع! يمكنني أن أريك مطاعم ومقاهي يمكن الوصول إليها في الأردن. كثير منها لديه منحدرات ودورات مياه مجهزة وأبواب واسعة. هل تريد رؤيتها على الخريطة؟',
-            'suggestions': ['عرض على الخريطة', 'تصفية حسب المنطقة', 'مشاهدة التقييمات'],
+            'response':    'يمكنني أن أريك مطاعم ومقاهي يمكن الوصول إليها في الأردن مع منحدرات ودورات مياه مجهزة.',
+            'suggestions': ['مطاعم ومقاهي', 'مراكز تسوق', 'رعاية صحية', 'حدائق'],
+            'locations':   [],
         },
         'مساعدة': {
-            'response': 'أنا هنا لمساعدتك في إيجاد أماكن يمكن الوصول إليها في الأردن! يمكنك أن تسألني عن:\n• إمكانية الوصول بكرسي متحرك\n• مواقف السيارات المخصصة\n• دورات المياه\n• لافتات برايل\n• المساعدة الصوتية\n• أو أي نوع محدد من الأماكن',
-            'suggestions': ['مطاعم', 'رعاية صحية', 'تسوق', 'مواصلات'],
+            'response':    'أنا هنا لمساعدتك في إيجاد أماكن يمكن الوصول إليها في الأردن! اسألني عن الكراسي المتحركة، المواقف، دورات المياه، أو أي نوع من الأماكن.',
+            'suggestions': ['مطاعم ومقاهي', 'رعاية صحية', 'مراكز تسوق', 'مواصلات'],
+            'locations':   [],
         },
     }
 
-    responses = responses_ar if lang == 'ar' else responses_en
+    responses = keyword_responses_ar if lang == 'ar' else keyword_responses_en
+    for key, val in responses.items():
+        if key in msg_lower:
+            return jsonify(val), 200
 
-    for key in responses.keys():
-        if key in message:
-            return jsonify(responses[key]), 200
+    if lang == 'ar':
+        return jsonify({
+            'response':    'أنا هنا لمساعدتك في إيجاد أماكن يمكن الوصول إليها في الأردن. يمكنك أن تسألني عن الكراسي المتحركة، مواقف السيارات، دورات المياه، أو أي نوع من الأماكن.',
+            'suggestions': ['كرسي متحرك', 'مواقف مخصصة', 'مطاعم ومقاهي', 'رعاية صحية'],
+            'locations':   [],
+        }), 200
 
-    default_response = {
-        'en': {
-            'response': "I'm here to help you find accessible locations in Jordan. You can ask me about wheelchair accessibility, parking, restrooms, or specific types of locations like restaurants, malls, or healthcare facilities. How can I assist you?",
-            'suggestions': ['Wheelchair access', 'Accessible parking', 'Restaurants', 'Healthcare'],
-        },
-        'ar': {
-            'response': 'أنا هنا لمساعدتك في إيجاد أماكن يمكن الوصول إليها في الأردن. يمكنك أن تسألني عن إمكانية الوصول بكرسي متحرك، مواقف السيارات، دورات المياه، أو أنواع محددة من الأماكن مثل المطاعم أو المراكز الصحية. كيف يمكنني مساعدتك؟',
-            'suggestions': ['كرسي متحرك', 'مواقف مخصصة', 'مطاعم', 'رعاية صحية'],
-        },
-    }
-    return jsonify(default_response.get(lang, default_response['en'])), 200
+    return jsonify({
+        'response':    "Ask me about wheelchair access, parking, restrooms, or any type of place you're looking for across Jordan.",
+        'suggestions': ['Wheelchair access', 'Accessible parking', 'Restaurants & Cafes', 'Healthcare'],
+        'locations':   [],
+    }), 200
 
-
-# ═════════════════════════════════════════════
-#  ACCESSIBILITY SETTINGS
-# ═════════════════════════════════════════════
 
 @mobile_api.route('/accessibility-settings', methods=['GET'])
 @jwt_required()
 def api_get_accessibility_settings():
-    """Get the current user's accessibility settings."""
     user = get_current_user()
     if not user:
         return jsonify({'error': 'User not found'}), 404
@@ -1083,19 +1254,7 @@ def api_get_accessibility_settings():
 @mobile_api.route('/accessibility-settings', methods=['PUT'])
 @jwt_required()
 def api_update_accessibility_settings():
-    """
-    Update accessibility settings.
-
-    Request JSON:
-    {
-        "highContrast": bool,
-        "textSize": int,
-        "dyslexiaFont": bool,
-        "reducedMotion": bool,
-        "colorBlindMode": "none" | "protanopia" | "deuteranopia" | "tritanopia"
-    }
-    """
-    from app import db
+    from extensions import db
 
     user = get_current_user()
     if not user:
@@ -1106,7 +1265,7 @@ def api_update_accessibility_settings():
         return jsonify({'error': 'Request body required'}), 400
 
     try:
-        # Ensure it's serializable before we commit
+        # check JSON-serializable before commit
         serialized = json.dumps(data)
         user.accessibility_settings = serialized
         db.session.commit()
@@ -1120,45 +1279,37 @@ def api_update_accessibility_settings():
     return jsonify({'success': True, 'settings': data}), 200
 
 
-# ═════════════════════════════════════════════
-#  USER PROFILE LOCATIONS
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/my-locations', methods=['GET'])
 @jwt_required()
 def api_my_locations():
-    """Get all locations created by the current user."""
-    from app import Location
+    """all locations created by the current user."""
+    from models import Location, Review
 
     user = get_current_user()
     if not user:
         return jsonify({'error': 'Authentication required'}), 401
 
-    locations = (Location.query
-                 .filter_by(user_id=user.id)
-                 .order_by(Location.created_at.desc())
-                 .all())
+    locations = (
+        Location.query
+        .options(*_location_query_options())
+        .filter_by(user_id=user.id)
+        .order_by(Location.created_at.desc())
+        .all()
+    )
 
-    # Use the same serializer the other endpoints use — guarantees field
-    # parity between /locations and /my-locations.
+    # same serializer as other endpoints — guarantees field parity
     return jsonify([_serialize_location(loc, include_reviews=False) for loc in locations]), 200
 
 
-# ═════════════════════════════════════════════
-#  STATIC FILE HELPER (for photo URLs)
-# ═════════════════════════════════════════════
-
 @mobile_api.route('/uploads/<path:filename>', methods=['GET'])
 def api_serve_upload(filename):
-    """
-    Serve uploaded photos. The mobile app constructs image URLs as:
-        {BASE_URL}/api/v1/uploads/{filename}
-    """
+    """serve uploaded photos at {BASE_URL}/api/v1/uploads/{filename}."""
     from flask import send_from_directory
 
-    # Prevent path traversal — only serve filenames that are safe basenames
+    # only accept safe basenames; prevents path traversal
     safe_name = os.path.basename(filename)
     if safe_name != filename or not safe_name:
         abort(404)
 
     return send_from_directory(current_app.config['UPLOAD_FOLDER'], safe_name)
+

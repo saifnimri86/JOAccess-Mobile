@@ -1,25 +1,20 @@
-/**
- * Bilingual Translations (English / Arabic)
- * ==========================================
- * Every user-facing string in the app lives here.
- * Components call useLanguage().t('key') to get the correct translation.
- */
+// every user-facing string. components call useLanguage().t('key').
 
 const translations = {
-  // ── App-wide ──
+  // app-wide
   appName: { en: 'JOAccess', ar: 'JOAccess' },
   tagline: {
     en: 'Accessibility Map Jordan',
     ar: 'خريطة الوصول الأردن',
   },
 
-  // ── Navigation / Tabs ──
+  // navigation / tabs
   tabMap: { en: 'Map', ar: 'الخريطة' },
   tabProfile: { en: 'Profile', ar: 'الملف الشخصي' },
   tabChat: { en: 'Assistant', ar: 'المساعد' },
   tabSettings: { en: 'Settings', ar: 'الإعدادات' },
 
-  // ── Auth ──
+  // auth
   login: { en: 'Login', ar: 'تسجيل الدخول' },
   signup: { en: 'Sign Up', ar: 'إنشاء حساب' },
   logout: { en: 'Logout', ar: 'تسجيل الخروج' },
@@ -75,14 +70,14 @@ const translations = {
     ar: 'تم إنشاء الحساب! يرجى تسجيل الدخول.',
   },
 
-  // ── User Type ──
+  // user type
   userType: { en: 'Account Type', ar: 'نوع الحساب' },
   individual: { en: 'Individual', ar: 'فرد' },
   organization: { en: 'Organization', ar: 'منظمة' },
   organizationName: { en: 'Organization Name', ar: 'اسم المنظمة' },
   disability: { en: 'Disability (optional)', ar: 'الإعاقة (اختياري)' },
 
-  // ── Map ──
+  // map
   searchLocations: { en: 'Search locations...', ar: 'ابحث عن الأماكن...' },
   filters: { en: 'Filters', ar: 'التصفية' },
   categories: { en: 'Categories', ar: 'الفئات' },
@@ -100,7 +95,7 @@ const translations = {
   applyFilters: { en: 'Apply Filters', ar: 'تطبيق التصفية' },
   clearFilters: { en: 'Clear All', ar: 'مسح الكل' },
 
-  // ── Location Details ──
+  // location details
   rateLocation: { en: 'Rate Location', ar: 'قيّم الموقع' },
   reportLocation: { en: 'Report Location', ar: 'الإبلاغ عن الموقع' },
   addReview: { en: 'Add Review', ar: 'أضف تقييم' },
@@ -116,7 +111,7 @@ const translations = {
   other: { en: 'Other', ar: 'أخرى' },
   directions: { en: 'Directions', ar: 'الاتجاهات' },
 
-  // ── Add / Edit Location ──
+  // add / edit location
   addLocation: { en: 'Add Location', ar: 'إضافة موقع' },
   editLocation: { en: 'Edit Location', ar: 'تعديل الموقع' },
   locationNameEn: { en: 'Name (English)', ar: 'الاسم (إنجليزي)' },
@@ -158,7 +153,7 @@ const translations = {
     ar: 'تم حذف الموقع بنجاح!',
   },
 
-  // ── Profile ──
+  // profile
   myLocations: { en: 'My Locations', ar: 'مواقعي' },
   locationsAdded: { en: 'Locations Added', ar: 'المواقع المضافة' },
   memberSince: { en: 'Member Since', ar: 'عضو منذ' },
@@ -175,7 +170,7 @@ const translations = {
     ar: 'سجل الدخول لعرض ملفك الشخصي',
   },
 
-  // ── Chatbot ──
+  // chatbot
   chatbotTitle: { en: 'JOAccess Assistant', ar: 'مساعد JOAccess' },
   chatPlaceholder: { en: 'Type your message...', ar: 'اكتب رسالتك...' },
   chatWelcome: {
@@ -183,7 +178,7 @@ const translations = {
     ar: 'مرحباً! أنا هنا لمساعدتك في العثور على أماكن يمكن الوصول إليها في الأردن. يمكنك سؤالي عن:\n• أماكن يمكن الوصول إليها بكرسي متحرك\n• مواقع بها مواقف سيارات مخصصة\n• أماكن بها دورات مياه مجهزة\n• مطاعم ومراكز تسوق ومرافق صحية\n\nما الذي تبحث عنه؟',
   },
 
-  // ── Settings ──
+  // settings
   
   settings: {
     en: 'Settings',
@@ -239,7 +234,7 @@ const translations = {
   about: { en: 'About', ar: 'حول' },
   version: { en: 'Version', ar: 'الإصدار' },
 
-  // ── Categories ──
+  // categories
   'Restaurants & Cafes': { en: 'Restaurants & Cafes', ar: 'مطاعم ومقاهي' },
   'Shopping Malls': { en: 'Shopping Malls', ar: 'مراكز تسوق' },
   Supermarkets: { en: 'Supermarkets', ar: 'سوبرماركت' },
@@ -256,7 +251,7 @@ const translations = {
   'Banks & ATMs': { en: 'Banks & ATMs', ar: 'بنوك وصرافات' },
   'Sports & Fitness': { en: 'Sports & Fitness', ar: 'رياضة ولياقة' },
 
-  // ── Accessibility Feature Names ──
+  // accessibility feature names
   wheelchair_ramp: { en: 'Wheelchair Ramp', ar: 'منحدر للكراسي المتحركة' },
   accessible_restroom: { en: 'Accessible Restroom', ar: 'حمام يمكن الوصول إليه' },
   braille_signage: { en: 'Braille Signage', ar: 'لافتات برايل' },
@@ -266,7 +261,7 @@ const translations = {
   wide_doorways: { en: 'Wide Doorways', ar: 'أبواب واسعة' },
   automatic_doors: { en: 'Automatic Doors', ar: 'أبواب أوتوماتيكية' },
 
-  // ── Common ──
+  // common
   loading: { en: 'Loading...', ar: 'جارٍ التحميل...' },
   error: { en: 'Error', ar: 'خطأ' },
   success: { en: 'Success', ar: 'نجاح' },
@@ -318,6 +313,37 @@ const translations = {
   multipleDisabilities: { en: 'Multiple Disabilities', ar: 'إعاقات متعددة' },
   otherDisability: { en: 'Other', ar: 'أخرى' },
 
+  uploadedBy: { en: 'Uploaded by', ar: 'تم الرفع بواسطة' },
+  anonymous: { en: 'Anonymous', ar: 'مجهول' },
+
+  // developer (hidden)
+  developerSection: { en: 'Developer', ar: 'المطوّر' },
+  stagingMode: { en: 'Use staging backend', ar: 'استخدم خادم التجريب' },
+  stagingModeDesc: {
+    en: 'Switch the app to the staging API. The app will restart.',
+    ar: 'التبديل إلى خادم التجريب. سيتم إعادة تشغيل التطبيق.',
+  },
+  currentBackend: { en: 'Current backend', ar: 'الخادم الحالي' },
+  restartRequiredTitle: { en: 'Restart required', ar: 'إعادة التشغيل مطلوبة' },
+  restartRequiredBody: {
+    en: 'Switching backend requires an app restart. Continue?',
+    ar: 'يتطلب تبديل الخادم إعادة تشغيل التطبيق. هل تريد المتابعة؟',
+  },
+  restartNow: { en: 'Restart now', ar: 'إعادة التشغيل الآن' },
+  devUnlocked: { en: 'Developer options unlocked', ar: 'تم فتح خيارات المطور' },
+  devLocked: { en: 'Developer options hidden', ar: 'تم إخفاء خيارات المطور' },
+
+  // reviews list screen
+  viewAllReviews: { en: 'View all reviews', ar: 'عرض جميع التقييمات' },
+  allReviews: { en: 'All reviews', ar: 'جميع التقييمات' },
+  latestReview: { en: 'Latest review', ar: 'أحدث تقييم' },
+  noReviewsYet: { en: 'No reviews yet', ar: 'لا توجد تقييمات بعد' },
+  sortBy: { en: 'Sort by', ar: 'ترتيب حسب' },
+  sortDateNewest: { en: 'Newest first', ar: 'الأحدث أولاً' },
+  sortDateOldest: { en: 'Oldest first', ar: 'الأقدم أولاً' },
+  sortRatingHighest: { en: 'Highest rated', ar: 'الأعلى تقييماً' },
+  sortRatingLowest: { en: 'Lowest rated', ar: 'الأقل تقييماً' },
+  back: { en: 'Back', ar: 'رجوع' },
 };
 
 export default translations;

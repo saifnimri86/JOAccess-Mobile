@@ -7,7 +7,7 @@ export default function ThemeCard({ children, style, ...rest }) {
   const { theme } = useAccessibility();
 
   if (theme.glassUI) {
-    // Strip solid background so the glass blur is visible
+    // strip solid bg so the glass blur is visible
     const flattened = StyleSheet.flatten(style) || {};
     const { backgroundColor, elevation, shadowColor, shadowOffset, shadowOpacity, shadowRadius, borderWidth, borderColor, borderTopWidth, borderBottomWidth, borderLeftWidth, borderRightWidth, ...glassStyle } = flattened;
 

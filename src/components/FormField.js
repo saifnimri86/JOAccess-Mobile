@@ -1,32 +1,3 @@
-/**
- * FormField
- * =========
- * Reusable input field with icon, label, and focus animation.
- * Used by Login, Signup, AddEditLocation, Rate panel, etc.
- *
- * Features:
- *   - Icon on the leading edge (respects RTL)
- *   - Animated border color on focus (spring, skipped under reducedMotion)
- *   - Proper accessibilityLabel forwarding
- *   - Eye toggle for password fields
- *   - Error state (red border + error text below)
- *
- * Props:
- *   icon               Ionicon name, optional
- *   label              visible label above the input (optional — use placeholder if omitted)
- *   placeholder        string
- *   value              string
- *   onChangeText       fn
- *   secureTextEntry    boolean — adds eye toggle
- *   keyboardType       passthrough
- *   autoComplete       passthrough
- *   autoCapitalize     passthrough
- *   multiline          boolean
- *   numberOfLines      number — rows for multiline
- *   error              string — shown below the field in red when truthy
- *   accessibilityHint  string
- */
-
 import React, { useState } from 'react';
 import { View, Text, TextInput, StyleSheet, Platform } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -50,6 +21,7 @@ export default function FormField({
   multiline = false,
   numberOfLines = 1,
   error,
+  hint,
   accessibilityHint,
   returnKeyType,
   onSubmitEditing,
@@ -59,8 +31,6 @@ export default function FormField({
   const [focused, setFocused] = useState(false);
   const [hidden, setHidden]   = useState(secureTextEntry);
 
-  // Animate border color on focus. We use a shared value for the focus
-  // progress (0 → 1) and interpolate colors in the animated style.
   const focusProgress = useSharedValue(0);
 
   React.useEffect(() => {
@@ -130,7 +100,7 @@ export default function FormField({
               fontFamily: theme.fontFamily,
               textAlign,
               minHeight:  multiline ? 80 : Platform.OS === 'ios' ? 28 : 44,
-              // Vertically align on Android multiline — otherwise it centers
+              // android multiline otherwise centers
               textAlignVertical: multiline ? 'top' : 'center',
             },
           ]}
@@ -180,13 +150,26 @@ export default function FormField({
         >
           {error}
         </Text>
+      ) : hint ? (
+        <Text
+          style={{
+            color:    theme.color.textMuted,
+            fontSize: scale(theme.fontSizes.xs),
+            marginTop: 6,
+            marginLeft: 4,
+            fontFamily: theme.fontFamily,
+            textAlign,
+          }}
+        >
+          {hint}
+        </Text>
       ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { marginBottom: 14 },
+  root: { marginBottom: 12 },
   fieldRow: {
     flexDirection: 'row',
     alignItems:    'center',

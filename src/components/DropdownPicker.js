@@ -67,7 +67,7 @@ export default function DropdownPicker({
   const [open, setOpen] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
 
-  // Force left alignment so Arabic doesn't flip to the opposite side
+  // force LTR so arabic doesn't flip the option list
   const textAlign = 'left';
   const selectedOption = options.find((o) => o.value === value);
 
@@ -140,7 +140,7 @@ export default function DropdownPicker({
             borderWidth: 1.5,
           }}
         >
-          {/* Inner view handles flex row to prevent GlassCard from stacking elements vertically */}
+          {/* inner row prevents GlassCard from stacking children vertically */}
           <View style={styles.innerRow}>
             {icon && (
               <Ionicons

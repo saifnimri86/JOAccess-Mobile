@@ -1,26 +1,3 @@
-/**
- * StaggeredReveal
- * ===============
- * A one-liner animation wrapper that fades and slides a child in,
- * optionally staggered by an index so list items appear sequentially.
- *
- * Usage:
- *   {items.map((item, i) => (
- *     <StaggeredReveal key={item.id} index={i}>
- *       <Card />
- *     </StaggeredReveal>
- *   ))}
- *
- * Props:
- *   index         number — used to compute the stagger delay (default 0)
- *   staggerMs     number — ms between items (default: theme.motion.staggerStep)
- *   from          'bottom' | 'right' | 'left' | 'fade-only' (default 'bottom')
- *   distance      number — how many px to translate from (default 16)
- *
- * Respects reducedMotion: if the user has it on, children render with no
- * animation at all — no delay, no movement, no fade.
- */
-
 import React, { useEffect } from 'react';
 import Animated, {
   useSharedValue, useAnimatedStyle, withDelay, withTiming,

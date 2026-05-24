@@ -1,20 +1,5 @@
-/**
- * Language Context (Phase 1.5 edits)
- * ==================================
- * Change from previous: when switching between LTR (English) and RTL
- * (Arabic), we now automatically reload the app bundle so the RN
- * I18nManager's native layout flip takes effect. Previously the user
- * had to manually restart.
- *
- * Two reload paths, tried in order:
- *   1. `react-native-restart` if installed — cleanest, true native restart
- *   2. `DevSettings.reload()` — works in debug builds, reloads the JS bundle
- *   3. fallback: show an alert (release builds without the restart lib)
- *
- * The fontFamily / colorBlindMode / high-contrast settings don't need a
- * reload — they're all pure JS state and re-render every consumer instantly.
- * Only RTL direction-change requires a full native relayout.
- */
+// switching between LTR/RTL triggers a native reload so I18nManager's
+// layout flip takes effect. only RTL direction change needs the reload.
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { I18nManager, DevSettings, Alert, Platform, NativeModules } from 'react-native';
@@ -24,27 +9,11 @@ import translations from '../utils/translations';
 const LanguageContext = createContext(null);
 const LANG_KEY = 'joaccess_language';
 
-/**
- * Read the device locale from the native side, trying several sources
- * because different Android builds populate different fields at startup.
- *
- * Sources, in order:
- *   1. Android: NativeModules.I18nManager.localeIdentifier   → "ar_JO"
- *   2. iOS:     NativeModules.SettingsManager.settings.AppleLocale
- *   3. iOS:     first of AppleLanguages                       → "ar-JO"
- *   4. Cross:   global Intl.DateTimeFormat().resolvedOptions().locale
- *               — works even before RN's native modules have warmed up
- *   5. Cross:   I18nManager.isRTL — weakest signal, but if the native
- *               side has flipped to RTL, we know the device is in a
- *               RTL language and Arabic is by far the most likely one
- *               for our user base
- *
- * Returns one of 'ar' | 'en'.
- */
+// returns 'ar' | 'en'. tries multiple sources because android builds
+// populate different fields at startup.
 function detectDeviceLanguage() {
   const candidates = [];
 
-  // 1 & 2 & 3 — native modules
   try {
     if (Platform.OS === 'ios') {
       const s = NativeModules?.SettingsManager?.settings;
@@ -58,8 +27,7 @@ function detectDeviceLanguage() {
     }
   } catch {}
 
-  // 4 — Intl API. This is a JS-native source and doesn't depend on RN's
-  // native modules having warmed up yet. Very reliable on modern Hermes.
+  // intl API doesn't depend on native modules being warm
   try {
     if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
       const loc = Intl.DateTimeFormat().resolvedOptions()?.locale;
@@ -67,21 +35,17 @@ function detectDeviceLanguage() {
     }
   } catch {}
 
-  // Test each candidate
   for (const raw of candidates) {
     const normalized = String(raw).toLowerCase().replace(/-/g, '_');
     if (normalized === 'ar' || normalized.startsWith('ar_')) return 'ar';
   }
 
-  // 5 — last resort: if the native side already thinks we're in RTL,
-  // Arabic is the most plausible choice for this app's target audience.
+  // last resort: if native side is in RTL, arabic is most plausible
   if (I18nManager.isRTL) return 'ar';
 
   return 'en';
 }
 
-// Try to import react-native-restart. If not installed, the try/catch
-// falls through and we use DevSettings.reload() instead.
 let RNRestart = null;
 try {
   // eslint-disable-next-line global-require, import/no-unresolved
@@ -90,12 +54,7 @@ try {
   RNRestart = null;
 }
 
-/**
- * Reload the app. Falls through several strategies depending on what's
- * available. Always returns — never throws.
- */
 function reloadApp() {
-  // 1. react-native-restart — preferred (true native Activity restart)
   if (RNRestart && typeof RNRestart.Restart === 'function') {
     try {
       RNRestart.Restart();
@@ -109,9 +68,7 @@ function reloadApp() {
     } catch {}
   }
 
-  // 2. DevSettings.reload — works in debug mode always, and in release
-  //    builds ONLY if the dev menu is still wired in. Ship this as a
-  //    fallback but don't rely on it for production.
+  // debug-mode fallback; not reliable in release builds
   if (DevSettings && typeof DevSettings.reload === 'function') {
     try {
       DevSettings.reload('Language changed');
@@ -134,20 +91,10 @@ export function LanguageProvider({ children }) {
     try {
       const saved = await EncryptedStorage.getItem(LANG_KEY);
 
-      // The saved value is ONLY written when the user explicitly picks a
-      // language (see setLanguage below). So if it exists here, it's the
-      // user's chosen language and we respect it. If it's absent — which
-      // includes the first-install case — we always go through detection.
-      //
-      // Why not persist the detected value on first launch? Because Android
-      // auto-backup can restore EncryptedStorage contents across reinstalls
-      // (via cloud backup of app data), which breaks "detect on fresh
-      // install" behaviour if we pre-populate the key. By keeping the key
-      // empty until user action, we get re-detection on every reinstall
-      // regardless of backup state.
+      // saved is only written on explicit user pick. left empty on fresh install
+      // so android auto-backup can't restore a stale pick across reinstalls.
 
       if (saved === 'ar' || saved === 'en') {
-        // User previously picked a language — respect it over device locale.
         setLang(saved);
         const wantRTL = saved === 'ar';
         if (I18nManager.isRTL !== wantRTL) {
@@ -155,7 +102,6 @@ export function LanguageProvider({ children }) {
           I18nManager.forceRTL(wantRTL);
         }
       } else {
-        // No saved user choice — detect device locale every time.
         const detected = detectDeviceLanguage();
         setLang(detected);
 
@@ -164,26 +110,18 @@ export function LanguageProvider({ children }) {
           I18nManager.allowRTL(wantRTL);
           I18nManager.forceRTL(wantRTL);
 
-          // If the direction flipped, reload so RN lays out RTL correctly.
-          // Without this the first-launch user sees LTR layout even though
-          // lang === 'ar' until they manually restart the app.
+          // reload so RN lays out RTL correctly on first launch
           setTimeout(() => {
             reloadApp();
           }, 120);
         }
       }
     } catch {
-      // default to 'en'
     } finally {
       setIsReady(true);
     }
   }
 
-  /**
-   * Switch language, persist, and reload the app if the RTL flag actually
-   * changed. If we were already in the target direction (e.g., switching
-   * en → en), just set state and skip the reload.
-   */
   async function setLanguage(newLang) {
     if (newLang !== 'en' && newLang !== 'ar') return;
     if (newLang === lang) return;
@@ -198,7 +136,7 @@ export function LanguageProvider({ children }) {
       I18nManager.allowRTL(wantRTL);
       I18nManager.forceRTL(wantRTL);
 
-      // Give the write a tick to flush and setState to commit
+      // let the write flush and setState commit
       setTimeout(() => {
         const reloaded = reloadApp();
         if (!reloaded) {

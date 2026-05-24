@@ -1,26 +1,3 @@
-/**
- * App Navigator (Phase 1.5)
- * =========================
- * Upgrades from Phase 1:
- *
- *  1. Custom stack transitions (spring slide + fade) using React Navigation's
- *     built-in `TransitionPresets`. Falls back to `ModalSlideFromBottomIOS`
- *     feel with Android-appropriate timing.
- *
- *  2. When `prefersReducedMotion` is on, transitions become instant (0ms).
- *
- *  3. A new glass tab bar — floating above the screen content with a blur
- *     background, rounded corners, and the active tab with a maroon pill
- *     indicator. Tab icons animate with a spring scale on focus.
- *
- *  4. Proper safe area handling — the tab bar sits ABOVE the gesture bar
- *     on Android 14+ devices instead of under it.
- *
- *  5. Bottom inset for the tab bar is forwarded to screens via a header-
- *     less stack so the ScrollViews know to add bottom padding equal to
- *     (tab bar height + safe-area bottom).
- */
-
 import React from 'react';
 import { View, Text, StyleSheet, Platform } from 'react-native';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
@@ -36,10 +13,10 @@ import Animated, {
 
 import { useLanguage } from '../context/LanguageContext';
 import { useAccessibility } from '../context/AccessibilityContext';
+import { useAuth } from '../context/AuthContext';
 import ThemeCard from '../components/ThemeCard';
 import AnimatedPressable from '../components/AnimatedPressable';
 
-// Screens
 import MapScreen from '../screens/MapScreen';
 import ChatbotScreen from '../screens/ChatbotScreen';
 import ProfileScreen from '../screens/ProfileScreen';
@@ -47,13 +24,11 @@ import SettingsScreen from '../screens/SettingsScreen';
 import LoginScreen from '../screens/LoginScreen';
 import SignupScreen from '../screens/SignupScreen';
 import AddEditLocationScreen from '../screens/AddEditLocationScreen';
+import LocationReviewsScreen from '../screens/LocationReviewsScreen';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
-// ════════════════════════════════════════════════════════════════
-// Glass tab bar
-// ════════════════════════════════════════════════════════════════
 function GlassTabBar({ state, descriptors, navigation }) {
   const { theme, prefersReducedMotion } = useAccessibility();
   const insets = useSafeAreaInsets();
@@ -62,10 +37,7 @@ function GlassTabBar({ state, descriptors, navigation }) {
     <View
       style={[
         styles.tabBarContainer,
-        {
-          bottom: Math.max(insets.bottom, 8) + 6,
-          // Don't interfere with touches on the map below the tab bar area
-        },
+        { bottom: Math.max(insets.bottom, 8) + 6 },
       ]}
       pointerEvents="box-none"
     >
@@ -122,7 +94,6 @@ function TabItem({ iconName, label, isFocused, onPress, reducedMotion }) {
   const { theme, scale } = useAccessibility();
   const sv = useSharedValue(isFocused ? 1 : 0.9);
 
-  // Spring the scale up when this tab becomes focused
   React.useEffect(() => {
     if (reducedMotion) { sv.value = 1; return; }
     sv.value = withSpring(isFocused ? 1.05 : 0.95, theme.motion.spring.gentle);
@@ -172,9 +143,6 @@ function TabItem({ iconName, label, isFocused, onPress, reducedMotion }) {
   );
 }
 
-// ════════════════════════════════════════════════════════════════
-// Tab navigator
-// ════════════════════════════════════════════════════════════════
 function MainTabs() {
   const { t } = useLanguage();
 
@@ -194,13 +162,10 @@ function MainTabs() {
   );
 }
 
-// ════════════════════════════════════════════════════════════════
-// Root stack with custom transitions
-// ════════════════════════════════════════════════════════════════
 export default function AppNavigator() {
   const { theme, prefersReducedMotion } = useAccessibility();
+  const { isAuthenticated } = useAuth();
 
-  // Use React Navigation's theme so default background matches our app
   const navTheme = {
     ...(theme.mode === 'dark' ? DarkTheme : DefaultTheme),
     colors: {
@@ -213,8 +178,6 @@ export default function AppNavigator() {
     },
   };
 
-  // Default screen options — slide-fade transition, or instant if reduced.
-  // 180ms is fast enough to feel responsive, slow enough to convey direction.
   const defaultScreenOptions = {
     headerShown: false,
     contentStyle: { backgroundColor: theme.color.bg },
@@ -225,7 +188,10 @@ export default function AppNavigator() {
 
   return (
     <NavigationContainer theme={navTheme}>
-      <Stack.Navigator screenOptions={defaultScreenOptions}>
+      <Stack.Navigator 
+        screenOptions={defaultScreenOptions}
+        initialRouteName={isAuthenticated ? 'Main' : 'Login'}
+      >
         <Stack.Screen name="Main" component={MainTabs} />
         <Stack.Screen
           name="Login"
@@ -245,6 +211,7 @@ export default function AppNavigator() {
         />
         <Stack.Screen name="AddLocation" component={AddEditLocationScreen} />
         <Stack.Screen name="EditLocation" component={AddEditLocationScreen} />
+        <Stack.Screen name="LocationReviews" component={LocationReviewsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
@@ -255,9 +222,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16, right: 16,
   },
-  tabBar: {
-    // GlassCard owns the blur + tint
-  },
+  tabBar: {},
   tabBarInner: {
     flexDirection: 'row',
     paddingVertical: 6,
@@ -271,9 +236,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   tabPill: {
-    // Fully round pill — was 999 before which works in most cases but on
-    // some Android layouts it didn't clip the active background to a
-    // proper capsule. Explicit dimensions + pill radius fixes that.
+    // explicit dimensions — borderRadius:999 doesn't clip properly on some android layouts
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 22,

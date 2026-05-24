@@ -1,17 +1,3 @@
-/**
- * LoginScreen (Phase 1.5)
- * =======================
- * Fully redesigned with the new design system:
- *   - Gradient header icon (circular, maroon-to-dark-maroon)
- *   - FormField inputs with focus animation
- *   - PrimaryButton for submit
- *   - Staggered entrance animations
- *   - SafeAreaView with top+bottom edges (since this is modal-presented)
- *   - KeyboardAvoidingView keeps the submit button visible when typing
- *
- * Preserves all existing behavior — same auth logic, same translations.
- */
-
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, KeyboardAvoidingView, Platform,
@@ -28,6 +14,7 @@ import FormField from '../components/FormField';
 import PrimaryButton from '../components/PrimaryButton';
 import AnimatedPressable from '../components/AnimatedPressable';
 import StaggeredReveal from '../components/StaggeredReveal';
+import { spacing, radii } from '../utils/theme';
 
 export default function LoginScreen({ navigation }) {
   const { login, clearError } = useAuth();
@@ -57,7 +44,11 @@ export default function LoginScreen({ navigation }) {
     setIsSubmitting(true);
     try {
       await login(email.trim().toLowerCase(), password);
-      navigation.goBack();
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        navigation.replace('Main');
+      }
     } catch (msg) {
       const msgText = typeof msg === 'string' ? msg : (msg?.message || t('invalidCredentials'));
       showDialog(t('error'), msgText);
@@ -85,10 +76,15 @@ export default function LoginScreen({ navigation }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Close button (since it's a modal) */}
           <View style={styles.closeRow}>
             <AnimatedPressable
-              onPress={() => navigation.goBack()}
+              onPress={() => {
+                if (navigation.canGoBack()) {
+                  navigation.goBack();
+                } else {
+                  navigation.replace('Main');
+                }
+              }}
               accessibilityLabel={t('cancel')}
               accessibilityRole="button"
               hitSlop={12}
@@ -98,7 +94,6 @@ export default function LoginScreen({ navigation }) {
             </AnimatedPressable>
           </View>
 
-          {/* Hero icon + title */}
           <StaggeredReveal index={0}>
             <View style={styles.hero}>
               <View style={[styles.iconCircle, { backgroundColor: theme.color.brand, ...theme.elevation.md }]}>
@@ -111,7 +106,7 @@ export default function LoginScreen({ navigation }) {
                   color:      theme.color.text,
                   fontFamily: theme.fontFamily,
                   textAlign:  'center',
-                  marginTop:  16,
+                  marginTop:  spacing.lg,
                 }}
                 accessibilityRole="header"
               >
@@ -121,7 +116,7 @@ export default function LoginScreen({ navigation }) {
                 style={{
                   fontSize:   scale(theme.fontSizes.md),
                   color:      theme.color.textMuted,
-                  marginTop:  6,
+                  marginTop:  spacing.xs + 2,
                   fontFamily: theme.fontFamily,
                   textAlign:  'center',
                 }}
@@ -131,7 +126,6 @@ export default function LoginScreen({ navigation }) {
             </View>
           </StaggeredReveal>
 
-          {/* Form */}
           <StaggeredReveal index={1}>
             <FormField
               icon="mail-outline"
@@ -161,9 +155,8 @@ export default function LoginScreen({ navigation }) {
             />
           </StaggeredReveal>
 
-          {/* Submit */}
           <StaggeredReveal index={3}>
-            <View style={{ marginTop: 8 }}>
+            <View style={{ marginTop: spacing.sm }}>
               <PrimaryButton
                 label={t('login')}
                 icon="log-in-outline"
@@ -174,7 +167,6 @@ export default function LoginScreen({ navigation }) {
             </View>
           </StaggeredReveal>
 
-          {/* Sign up link */}
           <StaggeredReveal index={4}>
             <View style={styles.footerRow}>
               <Text style={{
@@ -211,24 +203,24 @@ export default function LoginScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   root:    { flex: 1 },
-  content: { paddingHorizontal: 24, paddingBottom: 40, flexGrow: 1 },
+  content: { paddingHorizontal: spacing.xxl, paddingBottom: spacing.huge - spacing.sm, flexGrow: 1 },
 
-  closeRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
+  closeRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: spacing.sm },
   closeBtn: {
-    width: 40, height: 40, borderRadius: 20,
+    width: 40, height: 40, borderRadius: radii.pill,
     borderWidth: StyleSheet.hairlineWidth,
     justifyContent: 'center', alignItems: 'center',
   },
 
-  hero: { alignItems: 'center', marginVertical: 24 },
+  hero: { alignItems: 'center', marginVertical: spacing.xxl },
   iconCircle: {
-    width: 80, height: 80, borderRadius: 40,
+    width: 80, height: 80, borderRadius: radii.pill,
     justifyContent: 'center', alignItems: 'center',
   },
 
   footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: 24,
+    marginTop: spacing.xxl,
   },
 });

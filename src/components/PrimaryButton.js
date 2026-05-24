@@ -1,30 +1,3 @@
-/**
- * PrimaryButton
- * =============
- * The big branded call-to-action button. Used on Login submit,
- * Signup submit, AddLocation submit, etc.
- *
- * Variants:
- *   primary   — solid maroon background, white text (default)
- *   secondary — transparent with maroon border, maroon text
- *   ghost     — no border, subtle brand-muted background, brand text
- *   danger    — solid red background, white text
- *
- * Size:
- *   'md' (default) | 'lg'
- *
- * Props:
- *   label             string
- *   onPress           fn
- *   icon              Ionicon name (optional, rendered left of label)
- *   loading           boolean — shows spinner and disables
- *   disabled          boolean
- *   variant           'primary' | 'secondary' | 'ghost' | 'danger'
- *   size              'md' | 'lg'
- *   fullWidth         boolean — defaults true
- *   accessibilityHint
- */
-
 import React from 'react';
 import { View, Text, ActivityIndicator, StyleSheet } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';

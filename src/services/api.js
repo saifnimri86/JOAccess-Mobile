@@ -1,30 +1,10 @@
-/**
- * API Service (Phase 1.5)
- * =======================
- * Same API surface as before, BUT `getLocations()` now has offline
- * fallback behavior:
- *
- *   1. Try network request as normal
- *   2. On success: cache the response + return it
- *   3. On network failure: return cached data if any, with a flag
- *
- * All other endpoints behave the same — they still throw on failure
- * because it wouldn't make sense to fake a login or a write.
- *
- * Auth token management, refresh flow, and all other endpoints are
- * unchanged from the original api.js.
- */
-
 import EncryptedStorage from 'react-native-encrypted-storage';
-import { API_BASE } from '../config';
+import { getApiBase } from '../config';
 import { cacheLocations, getCachedLocations } from './cache';
 
-// ─────────────────────────────────────────────
-// Token Management (unchanged)
-// ─────────────────────────────────────────────
-const TOKEN_KEY         = 'joaccess_access_token';
+const TOKEN_KEY = 'joaccess_access_token';
 const REFRESH_TOKEN_KEY = 'joaccess_refresh_token';
-const USER_KEY          = 'joaccess_user';
+const USER_KEY = 'joaccess_user';
 
 export async function storeTokens(accessToken, refreshToken) {
   await EncryptedStorage.setItem(TOKEN_KEY, accessToken);
@@ -58,11 +38,8 @@ export async function clearAuth() {
   await EncryptedStorage.removeItem(USER_KEY);
 }
 
-// ─────────────────────────────────────────────
-// Core request helper (unchanged logic, just cleaner)
-// ─────────────────────────────────────────────
 async function apiRequest(endpoint, options = {}) {
-  const url = `${API_BASE}${endpoint}`;
+  const url = `${getApiBase()}${endpoint}`;
   const headers = { ...(options.headers || {}) };
 
   if (!(options.body instanceof FormData)) {
@@ -74,7 +51,7 @@ async function apiRequest(endpoint, options = {}) {
 
   const fetchOptions = { ...options, headers };
   if (fetchOptions.body && !(fetchOptions.body instanceof FormData)
-      && typeof fetchOptions.body === 'object') {
+    && typeof fetchOptions.body === 'object') {
     fetchOptions.body = JSON.stringify(fetchOptions.body);
   }
 
@@ -117,7 +94,7 @@ async function tryRefreshToken() {
   const refreshToken = await getRefreshToken();
   if (!refreshToken) return false;
   try {
-    const response = await fetch(`${API_BASE}/auth/refresh`, {
+    const response = await fetch(`${getApiBase()}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${refreshToken}` },
     });
@@ -126,13 +103,10 @@ async function tryRefreshToken() {
       await EncryptedStorage.setItem(TOKEN_KEY, data.access_token);
       return true;
     }
-  } catch {}
+  } catch { }
   return false;
 }
 
-// ─────────────────────────────────────────────
-// AUTH
-// ─────────────────────────────────────────────
 export async function login(email, password) {
   const data = await apiRequest('/auth/login', { method: 'POST', body: { email, password } });
   await storeTokens(data.access_token, data.refresh_token);
@@ -148,42 +122,45 @@ export async function getMe() {
   return apiRequest('/auth/me');
 }
 
-// ─────────────────────────────────────────────
-// LOCATIONS — now with cache fallback
-// ─────────────────────────────────────────────
-/**
- * Fetch locations with optional filters.
- *
- * Network-first strategy:
- *   1. Try the API. If it works, cache and return fresh data.
- *   2. If network fails, return whatever's in the cache — the caller
- *      gets a `_fromCache: true` marker attached to the array so the
- *      UI can show a banner.
- *
- * Filters are sent to the API but ignored when falling back to cache —
- * the cached list contains everything, and the UI re-applies filters
- * client-side anyway (see MapScreen's filteredLocations useMemo).
- */
+
+export async function changeUsername(newUsername) {
+  return apiRequest('/auth/change-username', {
+    method: 'PUT',
+    body: { new_username: newUsername },
+  });
+}
+
+// returns { available, username }; throws on transport error
+export async function checkUsernameAvailable(username) {
+  return apiRequest(`/auth/check-username?username=${encodeURIComponent(username)}`);
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  return apiRequest('/auth/change-password', {
+    method: 'PUT',
+    body: { current_password: currentPassword, new_password: newPassword },
+  });
+}
+
+
+// network-first; falls back to cache on transport failure with _fromCache marker.
 export async function getLocations(filters = {}) {
   const params = new URLSearchParams();
   if (filters.category) params.append('category', filters.category);
-  if (filters.feature)  params.append('feature',  filters.feature);
+  if (filters.feature) params.append('feature', filters.feature);
   if (filters.verified !== undefined) params.append('verified', filters.verified);
-  if (filters.search)   params.append('search',   filters.search);
+  if (filters.search) params.append('search', filters.search);
   const queryString = params.toString();
 
   try {
     const data = await apiRequest(`/locations${queryString ? `?${queryString}` : ''}`);
-    // Success: write-through cache and return
     await cacheLocations(data);
     return data;
   } catch (err) {
-    // Only fall back to cache on network errors (status 0). For 4xx/5xx we
-    // want the UI to surface the real error instead of silently hiding it.
+    // only fall back on transport errors — 4xx/5xx should surface
     if (err && err.status === 0) {
       const cached = await getCachedLocations();
       if (cached && cached.locations) {
-        // Attach non-enumerable markers the UI can read
         const result = cached.locations.slice();
         result._fromCache = true;
         result._lastUpdated = cached.lastUpdated;
@@ -214,9 +191,6 @@ export async function getMyLocations() {
   return apiRequest('/my-locations');
 }
 
-// ─────────────────────────────────────────────
-// REVIEWS
-// ─────────────────────────────────────────────
 export async function addReview(locationId, rating, comment) {
   return apiRequest(`/locations/${locationId}/reviews`, {
     method: 'POST',
@@ -231,9 +205,6 @@ export async function deleteReview(reviewId, reason = null) {
   });
 }
 
-// ─────────────────────────────────────────────
-// REPORTS
-// ─────────────────────────────────────────────
 export async function reportLocation(locationId, reason, description) {
   return apiRequest(`/locations/${locationId}/report`, {
     method: 'POST',
@@ -241,16 +212,23 @@ export async function reportLocation(locationId, reason, description) {
   });
 }
 
-// ─────────────────────────────────────────────
-// CHATBOT
-// ─────────────────────────────────────────────
-export async function sendChatMessage(message, lang = 'en') {
-  return apiRequest('/chatbot', { method: 'POST', body: { message, lang } });
+// location: { enabled, lat?, lng? }. lat/lng only sent when enabled and finite.
+export async function sendChatMessage(message, lang = 'en', location) {
+  const body = { message, lang };
+  const enabled = !!(location && location.enabled);
+  body.location_enabled = enabled;
+  if (
+    enabled &&
+    location &&
+    typeof location.lat === 'number' && Number.isFinite(location.lat) &&
+    typeof location.lng === 'number' && Number.isFinite(location.lng)
+  ) {
+    body.lat = location.lat;
+    body.lng = location.lng;
+  }
+  return apiRequest('/chatbot', { method: 'POST', body });
 }
 
-// ─────────────────────────────────────────────
-// ACCESSIBILITY SETTINGS
-// ─────────────────────────────────────────────
 export async function getAccessibilitySettings() {
   return apiRequest('/accessibility-settings');
 }

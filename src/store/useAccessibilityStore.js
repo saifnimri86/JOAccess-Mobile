@@ -13,6 +13,7 @@ const DEFAULTS = {
   colorBlindMode:  'none',
   textSizePercent: 100,
   glassUI:         false,
+  glassUIUnlocked: false,
 };
 
 export const useAccessibilityStore = create((set, get) => ({
@@ -27,16 +28,18 @@ export const useAccessibilityStore = create((set, get) => ({
       const raw = await EncryptedStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
+        // glassUI stays off unless the hidden unlock has been triggered
+        const unlocked = parsed.glassUIUnlocked ?? DEFAULTS.glassUIUnlocked;
+        const effectiveGlassUI = unlocked ? (parsed.glassUI ?? DEFAULTS.glassUI) : false;
         const theme = buildTheme(
           parsed.highContrast ?? DEFAULTS.highContrast,
           parsed.dyslexiaFont ?? DEFAULTS.dyslexiaFont,
           parsed.colorBlindMode ?? DEFAULTS.colorBlindMode,
-          parsed.glassUI ?? DEFAULTS.glassUI
+          effectiveGlassUI
         );
-        set({ ...parsed, theme });
+        set({ ...parsed, glassUI: effectiveGlassUI, theme });
       }
     } catch {
-      // Keep defaults
     } finally {
       set({ isReady: true });
     }
@@ -64,7 +67,6 @@ export const useAccessibilityStore = create((set, get) => ({
       set(merged);
       await EncryptedStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
     } catch {
-      // offline
     }
   },
 
@@ -79,7 +81,7 @@ export const useAccessibilityStore = create((set, get) => ({
     const nextPartial = { ...prevState, ...updates };
     const nextTheme = buildTheme(nextPartial.highContrast, nextPartial.dyslexiaFont, nextPartial.colorBlindMode, nextPartial.glassUI);
 
-    set({ ...updates, theme: nextTheme }); // Instant synchronous UI propagation via Zustand
+    set({ ...updates, theme: nextTheme });
     const nextState = {
       highContrast:    get().highContrast,
       dyslexiaFont:    get().dyslexiaFont,
@@ -87,9 +89,10 @@ export const useAccessibilityStore = create((set, get) => ({
       colorBlindMode:  get().colorBlindMode,
       textSizePercent: get().textSizePercent,
       glassUI:         get().glassUI,
+      glassUIUnlocked: get().glassUIUnlocked,
     };
 
-    // Offload storage/api to next tick
+    // offload storage/api to next tick
     setTimeout(() => {
       EncryptedStorage.setItem(STORAGE_KEY, JSON.stringify(nextState)).catch(() => {});
       if (syncServer) {

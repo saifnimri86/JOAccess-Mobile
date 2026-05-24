@@ -1,17 +1,4 @@
-/**
- * SettingsScreen (Phase 1.5)
- * ==========================
- * Changes from Phase 1:
- *   - Removed the live preview card (redundant — the whole app is the
- *     preview now that we're on Phase 1.5's full design system)
- *   - Added more deep-link buttons: TalkBack settings, Reduce motion,
- *     System accessibility overview
- *   - Screen-reader status card shows more context about what's detected
- *   - The language card now explains that switching RTL requires app restart
- *     (RN's I18nManager limitation) with a helper to do a soft reload
- */
-
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Switch, Linking, Platform, Alert,
 } from 'react-native';
@@ -21,20 +8,94 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 
 import { useLanguage } from '../context/LanguageContext';
 import { useAccessibility } from '../context/AccessibilityContext';
+import { useDialog } from '../context/DialogContext';
 import AnimatedPressable from '../components/AnimatedPressable';
 import SectionHeader from '../components/SectionHeader';
 import StaggeredReveal from '../components/StaggeredReveal';
 import ThemeCard from '../components/ThemeCard';
 import TalkBackGuide from '../components/TalkBackGuide';
+import { spacing, radii } from '../utils/theme';
+import { getBackendEnv, setBackendEnvAndRestart } from '../config';
 
 export default function SettingsScreen() {
   const { t, lang, isRTL, setLanguage } = useLanguage();
+  const { showDialog } = useDialog();
   const a11y = useAccessibility();
   const {
     theme, scale, announce, screenReaderEnabled, prefersReducedMotion,
     highContrast, dyslexiaFont, reducedMotion, colorBlindMode, textSizePercent,
-    glassUI, updateSettings,
+    glassUI, glassUIUnlocked, updateSettings,
   } = a11y;
+
+  // version row: 7 taps reveal the dev section, 7 more re-hide it.
+  // starts unlocked when already on staging so user has a path back to prod.
+  const currentEnv = getBackendEnv();
+  const [devUnlocked, setDevUnlocked] = useState(currentEnv === 'staging');
+  const devTapCountRef = useRef(0);
+  const devTapTimerRef = useRef(null);
+  const DEV_TAPS_REQUIRED = 7;
+
+  const bumpDevTap = () => {
+    if (devTapTimerRef.current) clearTimeout(devTapTimerRef.current);
+    devTapCountRef.current += 1;
+    devTapTimerRef.current = setTimeout(() => {
+      devTapCountRef.current = 0;
+    }, 2000);
+    if (devTapCountRef.current >= DEV_TAPS_REQUIRED) {
+      devTapCountRef.current = 0;
+      setDevUnlocked((prev) => {
+        const next = !prev;
+        announce(t(next ? 'devUnlocked' : 'devLocked'));
+        return next;
+      });
+    }
+  };
+
+  const onToggleStaging = (next) => {
+    const targetEnv = next ? 'staging' : 'prod';
+    if (targetEnv === currentEnv) return;
+    showDialog(
+      t('restartRequiredTitle'),
+      t('restartRequiredBody'),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        {
+          text: t('restartNow'),
+          onPress: () => { setBackendEnvAndRestart(targetEnv); },
+        },
+      ],
+    );
+  };
+
+  // tapping "100%" 10 times reveals the Glass UI toggle; 5 more re-hide it
+  const tapCountRef = useRef(0);
+  const tapResetTimerRef = useRef(null);
+  const [, forceTapTick] = useState(0); // forces a re-render so progress is visible
+  const TAPS_TO_UNLOCK = 10;
+  const TAPS_TO_RELOCK = 5;
+
+  const bumpHiddenTap = () => {
+    if (tapResetTimerRef.current) clearTimeout(tapResetTimerRef.current);
+    tapCountRef.current += 1;
+    forceTapTick((n) => n + 1);
+    // 2s pause resets the streak
+    tapResetTimerRef.current = setTimeout(() => {
+      tapCountRef.current = 0;
+      forceTapTick((n) => n + 1);
+    }, 2000);
+
+    const required = glassUIUnlocked ? TAPS_TO_RELOCK : TAPS_TO_UNLOCK;
+    if (tapCountRef.current >= required) {
+      tapCountRef.current = 0;
+      if (glassUIUnlocked) {
+        updateSettings({ glassUIUnlocked: false, glassUI: false });
+        announce(lang === 'ar' ? 'تم إخفاء الواجهة الزجاجية' : 'Glass UI hidden');
+      } else {
+        updateSettings({ glassUIUnlocked: true });
+        announce(lang === 'ar' ? 'تم فتح الواجهة الزجاجية' : 'Glass UI unlocked');
+      }
+    }
+  };
 
   const toggleHighContrast = () => {
     const next = !highContrast;
@@ -63,6 +124,7 @@ export default function SettingsScreen() {
   const setTextSize = (size) => {
     updateSettings({ textSizePercent: size });
     announce(`${t('textSize')} ${size}%`);
+    if (size === 100) bumpHiddenTap();
   };
 
   const setCbMode = (mode) => {
@@ -72,19 +134,11 @@ export default function SettingsScreen() {
 
   const switchLang = (target) => {
     if (lang === target) return;
-    // LanguageContext now auto-reloads the app on RTL change via
-    // react-native-restart (or DevSettings.reload as fallback). No more
-    // manual alert needed. If the reload fails for some reason, the
-    // LanguageContext itself shows an alert as a last resort.
     setLanguage(target);
   };
 
-  // ─── Deep-link helpers ────────────────────────────────────────────
-  // These open system-level settings pages the user can't easily find.
   const openAccessibilitySettings = () => {
     if (Platform.OS === 'android') {
-      // The generic accessibility settings page — lists every installed
-      // service including TalkBack, Select to Speak, etc.
       Linking.sendIntent?.('android.settings.ACCESSIBILITY_SETTINGS').catch(() => {
         Linking.openSettings().catch(() => { });
       });
@@ -94,8 +148,6 @@ export default function SettingsScreen() {
   };
 
   const openAppInfoPage = () => {
-    // Opens this app's specific info page in system settings — useful for
-    // granting permissions, clearing cache, etc.
     Linking.openSettings().catch(() => { });
   };
 
@@ -114,12 +166,11 @@ export default function SettingsScreen() {
         <ScrollView
           contentContainerStyle={[
             styles.content,
-            // Bottom padding accounts for the tab bar overlap
+            // padding for tab bar overlap
             { paddingBottom: 96 },
           ]}
           showsVerticalScrollIndicator={false}
         >
-          {/* Hero title */}
           <View style={styles.hero}>
             <Text
               style={{
@@ -146,7 +197,6 @@ export default function SettingsScreen() {
             </Text>
           </View>
 
-          {/* Language */}
           <StaggeredReveal index={0}>
             <SectionHeader title={t('language')} icon="language" align={textAlign} />
             <ThemeCard key={`lang-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
@@ -157,7 +207,6 @@ export default function SettingsScreen() {
             </ThemeCard>
           </StaggeredReveal>
 
-          {/* Display */}
           <StaggeredReveal index={1}>
             <SectionHeader title={lang === 'ar' ? 'العرض' : 'Display'} icon="color-palette" align={textAlign} />
             <ThemeCard key={`disp-${theme.mode}-${colorBlindMode}-${highContrast}-${dyslexiaFont}-${reducedMotion}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
@@ -184,18 +233,21 @@ export default function SettingsScreen() {
                 value={reducedMotion}
                 onToggle={toggleReducedMotion}
               />
-              <Divider />
-              <SettingToggleRow
-                icon="color-filter"
-                label={t('glassUI')}
-                description={t('glassUIDesc')}
-                value={glassUI}
-                onToggle={toggleGlassUI}
-              />
+              {glassUIUnlocked ? (
+                <>
+                  <Divider />
+                  <SettingToggleRow
+                    icon="color-filter"
+                    label={t('glassUI')}
+                    description={t('glassUIDesc')}
+                    value={glassUI}
+                    onToggle={toggleGlassUI}
+                  />
+                </>
+              ) : null}
             </ThemeCard>
           </StaggeredReveal>
 
-          {/* Text size */}
           <StaggeredReveal index={2}>
             <SectionHeader
               title={t('textSize')}
@@ -217,7 +269,6 @@ export default function SettingsScreen() {
             </ThemeCard>
           </StaggeredReveal>
 
-          {/* Color vision */}
           <StaggeredReveal index={3}>
             <SectionHeader title={t('colorBlindMode')} icon="eye" align={textAlign} />
             <ThemeCard key={`cb-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
@@ -241,7 +292,6 @@ export default function SettingsScreen() {
             </ThemeCard>
           </StaggeredReveal>
 
-          {/* Screen reader status + deep links */}
           <StaggeredReveal index={4}>
             <SectionHeader
               title={lang === 'ar' ? 'قارئ الشاشة والإمكانيات' : 'Screen Reader & System Accessibility'}
@@ -249,12 +299,9 @@ export default function SettingsScreen() {
               align={textAlign}
             />
 
-            {/* Inline help card — only renders when reader is off and the user
-                hasn't dismissed it before. Silently a no-op otherwise. */}
             <TalkBackGuide />
 
             <ThemeCard key={`sr-${theme.mode}-${colorBlindMode}-${screenReaderEnabled}-${prefersReducedMotion}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
-              {/* Current state */}
               <View style={[styles.settingRow, { paddingBottom: theme.spacing.md }]}>
                 <View style={[styles.settingIconBox, { backgroundColor: theme.color.brandMuted }]}>
                   <Ionicons name="mic" size={20} color={theme.color.textBrand} />
@@ -311,26 +358,51 @@ export default function SettingsScreen() {
             </ThemeCard>
           </StaggeredReveal>
 
-          {/* About */}
           <StaggeredReveal index={5}>
             <SectionHeader title={t('about')} icon="information-circle" align={textAlign} />
             <ThemeCard key={`about-${theme.mode}-${colorBlindMode}-${glassUI}`} style={[styles.card, cardStyle(theme)]}>
               <AboutRow label={t('appName')} value="JOAccess" />
               <Divider />
-              <AboutRow label={t('version')} value="1.0.0" />
+              <AnimatedPressable
+                onPress={bumpDevTap}
+                accessibilityRole="button"
+                accessibilityLabel={`${t('version')} 1.0.0`}
+              >
+                <AboutRow label={t('version')} value="1.0.0" />
+              </AnimatedPressable>
               <Divider />
               <AboutRow label="© 2025–2026" value="JUST" />
             </ThemeCard>
           </StaggeredReveal>
+
+          {devUnlocked ? (
+            <StaggeredReveal index={6}>
+              <SectionHeader
+                title={t('developerSection')}
+                icon="construct"
+                subtitle={`${t('currentBackend')}: ${currentEnv}`}
+                align={textAlign}
+              />
+              <ThemeCard
+                key={`dev-${theme.mode}-${colorBlindMode}-${glassUI}-${currentEnv}`}
+                style={[styles.card, cardStyle(theme)]}
+              >
+                <SettingToggleRow
+                  icon="server"
+                  label={t('stagingMode')}
+                  description={t('stagingModeDesc')}
+                  value={currentEnv === 'staging'}
+                  onToggle={onToggleStaging}
+                />
+              </ThemeCard>
+            </StaggeredReveal>
+          ) : null}
         </ScrollView>
       </SafeAreaView>
     </Animated.View>
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// Sub-components
-// ══════════════════════════════════════════════════════════════════════
 
 function LanguagePill({ label, active, onPress }) {
   const { theme, scale } = useAccessibility();
@@ -415,7 +487,7 @@ function SizeSegment({ size, selected, onPress }) {
       ]}
     >
       <Text style={{
-        fontSize: 14,
+        fontSize: scale(theme.fontSizes.sm),
         fontWeight: selected ? theme.fontWeights.bold : theme.fontWeights.semibold,
         color: selected ? theme.color.textOnBrand : theme.color.textMuted,
         fontFamily: theme.fontFamily,
@@ -543,48 +615,48 @@ const cardStyle = (theme) => ({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingTop: 24 },
+  content: { paddingHorizontal: spacing.xl, paddingTop: spacing.xxl },
 
-  hero: { marginBottom: 24 },
+  hero: { marginBottom: spacing.xxl },
 
-  langRow: { flexDirection: 'row', gap: 10 },
+  langRow: { flexDirection: 'row', gap: spacing.sm + 2 },
   langPill: {
-    flex: 1, paddingVertical: 14, borderWidth: 1.5,
+    flex: 1, paddingVertical: spacing.md + 2, borderWidth: 1.5,
     alignItems: 'center', justifyContent: 'center',
     minHeight: 48,
   },
 
   settingRow: {
     flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 10, gap: 12,
+    paddingVertical: spacing.sm + 2, gap: spacing.md,
   },
   settingIconBox: {
-    width: 36, height: 36, borderRadius: 10,
+    width: 36, height: 36, borderRadius: radii.md,
     justifyContent: 'center', alignItems: 'center',
   },
   settingLabel: { lineHeight: 22 },
-  settingDesc: { marginTop: 2 },
+  settingDesc: { marginTop: spacing.xxs },
 
   radio: { width: 24, alignItems: 'center' },
-  swatch: { width: 22, height: 22, borderRadius: 11, borderWidth: 1 },
+  swatch: { width: 22, height: 22, borderRadius: radii.pill, borderWidth: 1 },
 
-  sizeRow: { flexDirection: 'row', gap: 8 },
+  sizeRow: { flexDirection: 'row', gap: spacing.sm },
   sizeSegment: {
-    flex: 1, paddingVertical: 10,
+    flex: 1, paddingVertical: spacing.md,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1.5, minHeight: 44,
+    borderWidth: 1.5, minHeight: 48,
   },
 
   aboutRow: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingVertical: 10,
+    alignItems: 'center', paddingVertical: spacing.sm + 2,
   },
 
   deepLinkRow: {
     flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 14, paddingVertical: 12,
-    minHeight: 52,
+    paddingHorizontal: spacing.md + 2, paddingVertical: spacing.md,
+    minHeight: 48,
   },
 
-  statusDot: { width: 10, height: 10, borderRadius: 5 },
+  statusDot: { width: 10, height: 10, borderRadius: radii.pill },
 });

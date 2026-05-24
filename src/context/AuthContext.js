@@ -1,23 +1,13 @@
-/**
- * Auth Context
- * ============
- * Provides user authentication state to the entire app.
- * Handles login, signup, logout, and auto-restore of session from SecureStore.
- */
-
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import * as api from '../services/api';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);          // Current user object or null
-  const [isLoading, setIsLoading] = useState(true); // True while checking stored tokens
-  const [error, setError] = useState(null);          // Latest auth error message
+  const [user, setUser] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  /**
-   * On app start, check if we have a stored token and try to restore the session.
-   */
   useEffect(() => {
     restoreSession();
   }, []);
@@ -29,31 +19,23 @@ export function AuthProvider({ children }) {
       const token = await api.getAccessToken();
 
       if (storedUser && token) {
-        // Verify the token is still valid by hitting /auth/me
         try {
           const data = await api.getMe();
           setUser(data.user);
-          await api.storeUser(data.user); // Update stored data
+          await api.storeUser(data.user);
         } catch {
-          // Token expired or invalid — clear and go to login
+          // token expired or invalid
           await api.clearAuth();
           setUser(null);
         }
       }
     } catch {
-      // Storage error — start fresh
       setUser(null);
     } finally {
       setIsLoading(false);
     }
   }
 
-  /**
-   * Login with email and password.
-   * On success, stores tokens and sets user state.
-   * @returns {object} The user object
-   * @throws {string} Error message on failure
-   */
   async function login(email, password) {
     setError(null);
     try {
@@ -67,12 +49,7 @@ export function AuthProvider({ children }) {
     }
   }
 
-  /**
-   * Register a new account.
-   * Does NOT auto-login — user must login after signup.
-   * @returns {object} The response data
-   * @throws {string} Error message on failure
-   */
+  // does not auto-login — user must login after signup
   async function signup(userData) {
     setError(null);
     try {
@@ -84,25 +61,18 @@ export function AuthProvider({ children }) {
     }
   }
 
-  /**
-   * Logout — clears tokens and user state.
-   */
   async function logout() {
     await api.clearAuth();
     setUser(null);
     setError(null);
   }
 
-  /**
-   * Refresh user data from the server (e.g., after editing profile).
-   */
   async function refreshUser() {
     try {
       const data = await api.getMe();
       setUser(data.user);
       await api.storeUser(data.user);
     } catch {
-      // Silently fail — user data stays as-is
     }
   }
 
@@ -126,10 +96,6 @@ export function AuthProvider({ children }) {
   );
 }
 
-/**
- * Hook to access auth state and actions.
- * Must be used inside an <AuthProvider>.
- */
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {

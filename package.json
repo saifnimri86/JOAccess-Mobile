@@ -15,6 +15,7 @@
     "@react-navigation/native-stack": "^7.0.0",
     "react": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-config": "^1.6.1",
     "react-native-encrypted-storage": "^4.0.3",
     "react-native-geolocation-service": "^5.3.1",
     "react-native-gesture-handler": "~2.28.0",

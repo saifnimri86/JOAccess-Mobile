@@ -1,18 +1,3 @@
-/**
- * SkeletonLoader
- * ==============
- * A shimmering placeholder block you use to communicate "loading" without
- * the lazy spinner-in-the-middle-of-the-screen pattern.
- *
- * Respects reducedMotion — in that mode it's a plain static block.
- *
- * Props:
- *   width      number | '%' string
- *   height     number
- *   borderRadius number — defaults to theme.radii.md
- *   style      passthrough
- */
-
 import React, { useEffect } from 'react';
 import { StyleSheet } from 'react-native';
 import Animated, {

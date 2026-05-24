@@ -83,7 +83,6 @@ export default function AppDialog({ title, message, buttons, onDismiss }) {
       <View style={styles.centerer} pointerEvents="box-none">
         <Animated.View style={[{ borderRadius: theme.radii.xl }, theme.elevation.xl, cardStyle]}>
           <View style={[styles.card, { backgroundColor: theme.color.surface, borderRadius: theme.radii.xl }]}>
-            {/* Title + message */}
             <View style={styles.content}>
               <Text style={{
                 fontSize: scale(theme.fontSizes.lg),
@@ -110,7 +109,6 @@ export default function AppDialog({ title, message, buttons, onDismiss }) {
 
             <View style={[styles.divH, { backgroundColor: theme.color.border }]} />
 
-            {/* Buttons */}
             <View style={[styles.btnRow, horizontal && styles.btnRowH]}>
               {btns.map((btn, i) => {
                 const isDestructive = btn.style === 'destructive';
