@@ -33,9 +33,37 @@ export default function SignupScreen({ navigation }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errs, setErrs] = useState({});
 
+  const USERNAME_MAX = 25;
+
+  function handleUsernameChange(raw) {
+    const sanitized = (raw || '').replace(/[^A-Za-z0-9_]/g, '');
+    setUsername(sanitized);
+    if (!sanitized) {
+      setErrs(e => ({ ...e, username: undefined }));
+      return;
+    }
+    if (sanitized.length > USERNAME_MAX) {
+      setErrs(e => ({ ...e, username: lang === 'ar'
+        ? `الحد الأقصى ${USERNAME_MAX} حرفًا`
+        : `Username must be ${USERNAME_MAX} characters or fewer` }));
+    } else {
+      setErrs(e => ({ ...e, username: undefined }));
+    }
+  }
+
   async function handleSignup() {
     const newErrs = {};
-    if (!username.trim()) newErrs.username = t('usernameRequired');
+    if (!username.trim()) {
+      newErrs.username = t('usernameRequired');
+    } else if (username.length > USERNAME_MAX) {
+      newErrs.username = lang === 'ar'
+        ? `الحد الأقصى ${USERNAME_MAX} حرفًا`
+        : `Username must be ${USERNAME_MAX} characters or fewer`;
+    } else if (!/^[A-Za-z0-9_]+$/.test(username)) {
+      newErrs.username = lang === 'ar'
+        ? 'حروف وأرقام وشرطة سفلية فقط'
+        : 'Letters, digits, and underscores only';
+    }
     if (!email.trim()) newErrs.email = t('emailRequired');
     if (!password || password.length < 8) {
       newErrs.password = lang === 'ar'
@@ -164,9 +192,12 @@ export default function SignupScreen({ navigation }) {
                   icon="person-outline"
                   placeholder={t('username')}
                   value={username}
-                  onChangeText={setUsername}
+                  onChangeText={handleUsernameChange}
                   autoCapitalize="none"
                   error={errs.username}
+                  hint={lang === 'ar'
+                    ? 'حروف وأرقام وشرطة سفلية فقط · الحد 25'
+                    : 'Letters, digits, and underscores only · max 25'}
                   returnKeyType="next"
                 />
                 <FormField
