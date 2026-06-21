@@ -549,7 +549,15 @@ export default function AddEditLocationScreen({ route, navigation }) {
       }
       navigation.goBack();
     } catch (err) {
-      showDialog(t('error'), err.message || 'Save failed');
+      let errorMsg = err.message || 'Save failed';
+      if (typeof errorMsg === 'string') {
+        if (errorMsg.includes('already been added by another user') && errorMsg.includes('name')) {
+          errorMsg = t('locationNameExists');
+        } else if (errorMsg.includes('already been added by another user') && errorMsg.includes('spot')) {
+          errorMsg = t('locationProximityExists');
+        }
+      }
+      showDialog(t('error'), errorMsg);
     } finally {
       setSaving(false);
     }

@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TextInput,
   Linking, Platform, PermissionsAndroid,
-  Modal, Image, FlatList, Dimensions, TouchableOpacity, AppState
+  Modal, Image, FlatList, Dimensions, TouchableOpacity, AppState, Keyboard
 } from 'react-native';
 import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,6 +12,7 @@ import Geolocation from 'react-native-geolocation-service';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import Animated, {
   useSharedValue, useAnimatedStyle, withSpring, withTiming,
+  FadeInUp, FadeOutUp,
 } from 'react-native-reanimated';
 
 import { useFocusEffect, useRoute } from '@react-navigation/native';
@@ -57,7 +58,7 @@ const REPORT_REASONS = [
 export default function MapScreen({ navigation }) {
   const { t, lang, isRTL, getLocalized } = useLanguage();
   const { isAuthenticated } = useAuth();
-  const { theme, scale, announce, colorBlindMode, highContrast } = useAccessibility();
+  const { theme, scale, announce, colorBlindMode, highContrast, prefersReducedMotion } = useAccessibility();
   const { isOnline, markOffline } = useNetwork();
   const { showDialog } = useDialog();
   const insets = useSafeAreaInsets();
@@ -288,6 +289,13 @@ export default function MapScreen({ navigation }) {
           setShowDetail(true);
           announce(getLocalized(loc, 'name'));
         }
+        setSearchSuggestions([]);
+        setShowSuggestions(false);
+        Keyboard.dismiss();
+      } else if (msg.type === 'mapClick') {
+        setSearchSuggestions([]);
+        setShowSuggestions(false);
+        Keyboard.dismiss();
       }
     } catch { }
   };
@@ -508,6 +516,9 @@ export default function MapScreen({ navigation }) {
               ) : null}
               <AnimatedPressable
                 onPressIn={() => {
+                  setSearchSuggestions([]);
+                  setShowSuggestions(false);
+                  Keyboard.dismiss();
                   // break out of render queue so the scale animation plays
                   setTimeout(() => setShowFilters(true), 16);
                 }}
@@ -534,12 +545,16 @@ export default function MapScreen({ navigation }) {
           </ThemeCard>
 
           {showSuggestions ? (
-            <View style={[s.suggestionsDropdown, {
-              backgroundColor: theme.color.surface,
-              borderColor: theme.color.border,
-              borderRadius: theme.radii.md,
-              ...theme.elevation.md,
-            }]}>
+            <Animated.View
+              entering={prefersReducedMotion ? undefined : FadeInUp.duration(200)}
+              exiting={prefersReducedMotion ? undefined : FadeOutUp.duration(150)}
+              style={[s.suggestionsDropdown, {
+                backgroundColor: theme.color.surface,
+                borderColor: theme.color.border,
+                borderRadius: theme.radii.md,
+                ...theme.elevation.md,
+              }]}
+            >
               {searchSuggestions.map((loc, i) => (
                 <AnimatedPressable
                   key={loc.id}
@@ -579,7 +594,7 @@ export default function MapScreen({ navigation }) {
                   <Ionicons name="chevron-forward" size={14} color={theme.color.textMuted} />
                 </AnimatedPressable>
               ))}
-            </View>
+            </Animated.View>
           ) : null}
 
           {!loading && !loadError ? (
@@ -595,7 +610,12 @@ export default function MapScreen({ navigation }) {
           pointerEvents="box-none"
         >
           <AnimatedPressable
-            onPress={locateUser}
+            onPress={() => {
+              setSearchSuggestions([]);
+              setShowSuggestions(false);
+              Keyboard.dismiss();
+              locateUser();
+            }}
             accessibilityLabel={lang === 'ar' ? 'موقعي' : 'My location'}
             style={[
               s.fab,
@@ -1582,6 +1602,12 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
       crossOrigin: true
     }).addTo(map);
 
+    map.on('click', function() {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'mapClick'
+      }));
+    });
+
     window._markerGroup = L.layerGroup().addTo(map);
     window.updateMarkers = function(markers) {
       window._markerGroup.clearLayers();
@@ -1613,7 +1639,8 @@ function generateMapHtml(themeMode, colorBlindMode = 'none', highContrast = fals
         });
         var marker = L.marker([m.lat, m.lng], { icon: icon });
         marker.bindTooltip(m.name, { className: 'marker-tooltip', direction: 'top', offset: [0, -36] });
-        marker.on('click', function() {
+        marker.on('click', function(e) {
+          L.DomEvent.stopPropagation(e);
           window.ReactNativeWebView.postMessage(JSON.stringify({
             type: 'markerClick', locationId: m.id
           }));

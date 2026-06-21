@@ -152,6 +152,14 @@ const translations = {
     en: 'Location deleted successfully!',
     ar: 'تم حذف الموقع بنجاح!',
   },
+  locationNameExists: {
+    en: 'A location with this name has already been added by another user.',
+    ar: 'تم إضافة موقع بهذا الاسم بالفعل بواسطة مستخدم آخر.',
+  },
+  locationProximityExists: {
+    en: 'A location has already been added by another user at this spot.',
+    ar: 'تم إضافة موقع بالفعل بواسطة مستخدم آخر في هذا المكان.',
+  },
 
   // profile
   myLocations: { en: 'My Locations', ar: 'مواقعي' },
